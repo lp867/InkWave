@@ -81,7 +81,8 @@ class Arbeiter(QObject):
             m = kern.modell_finden(auftrag["modell"])
             if m is None or not m.bereit:
                 raise RuntimeError(f"Modell «{auftrag['modell']}» ist nicht heruntergeladen.")
-            schluessel = (m.name, m.pfad, auftrag["geraet"], auftrag["threads"])
+            # GPU-Paket gehört dazu: nach dem Einrichten wird das Modell neu (auf der GPU) geladen
+            schluessel = (m.name, m.pfad, auftrag["geraet"], auftrag["threads"], kern.gpu_paket_vorhanden())
             if schluessel != self._schluessel:
                 self._modell = self._batch = None      # altes Modell zuerst freigeben (Speicher)
                 gc.collect()
@@ -191,6 +192,7 @@ class Hauptfenster(QMainWindow):
         self.setAcceptDrops(True)
 
         self.gpu = False
+        self.gpu_name = ""
         self.laeuft = False
         self.modelle = []
         self.datei_start_zeit = 0.0
@@ -255,6 +257,11 @@ class Hauptfenster(QMainWindow):
         self.lbl_hardware.setFrameShape(QFrame.Shape.StyledPanel)
         self.lbl_hardware.setContentsMargins(10, 4, 10, 4)
         kopf.addWidget(self.lbl_hardware, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.btn_gpu = QPushButton("GPU einrichten …")
+        self.btn_gpu.setToolTip("Das GPU-Paket (cuBLAS + cuDNN) fehlt noch – ohne rechnet die App auf der CPU.")
+        self.btn_gpu.clicked.connect(lambda: self.modelle_oeffnen())
+        self.btn_gpu.hide()
+        kopf.addWidget(self.btn_gpu, 0, Qt.AlignmentFlag.AlignVCenter)
         haupt.addLayout(kopf)
 
         # Dateiliste + Knöpfe
@@ -395,11 +402,18 @@ class Hauptfenster(QMainWindow):
 
     # ------------------------------------------------------------ Hardware & Modelle
 
+    def _hardware_anzeigen(self):
+        if not self.gpu:
+            return
+        paket = kern.gpu_paket_vorhanden()
+        self.lbl_hardware.setText(f"⚡ {self.gpu_name}" + ("" if paket else "  (GPU-Paket fehlt → CPU)"))
+        self.btn_gpu.setVisible(not paket)
+
     def _hardware_bekannt(self, info):
         self.gpu = info["gpu"]
+        self.gpu_name = info["name"]
         if self.gpu:
-            paket = "" if info["paket"] else "  (GPU-Paket fehlt noch → CPU)"
-            self.lbl_hardware.setText(f"⚡ {info['name']}{paket}")
+            self._hardware_anzeigen()
         else:
             self.lbl_hardware.setText(f"Prozessor · {info['kerne']} Kerne · ohne Grafikkarte")
             i = self.cb_geraet.findData("cuda")
@@ -417,6 +431,7 @@ class Hauptfenster(QMainWindow):
         dialog = ModellDialog(self, self.gpu, erster_start)
         dialog.exec()
         self.modelle_fuellen()
+        self._hardware_anzeigen()
         dialog.deleteLater()
 
     def modelle_fuellen(self, modelle=None):

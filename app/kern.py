@@ -240,6 +240,241 @@ def gpu_vorhanden() -> bool:
         return False
 
 
+# GPU-Paket: nur die DLLs (bin-Ordner) aus diesen PyPI-Paketen; Versionen = bei Elias getestet
+GPU_PAKETE = [("nvidia-cublas-cu12", "12.9.2.10"), ("nvidia-cudnn-cu12", "9.27.0.42"),
+              ("nvidia-cuda-nvrtc-cu12", "12.9.86")]
+
+
+def vorhandene_nvidia_quelle():
+    """nvidia-Ordner einer vorhandenen Python-Installation mit cuBLAS + cuDNN (zum Übernehmen statt
+    Herunterladen) oder None."""
+    kandidaten = []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if d and (Path(d) / "python.exe").is_file():
+            kandidaten.append(Path(d) / "Lib" / "site-packages" / "nvidia")
+    for basis in (Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python",
+                  Path(os.environ.get("ProgramFiles", r"C:\Program Files"))):
+        try:
+            kandidaten += sorted(basis.glob("Python3*/Lib/site-packages/nvidia"), reverse=True)
+        except OSError:
+            pass
+    for k in kandidaten:
+        try:
+            if GPU_ORDNER in k.parents:
+                continue
+            if (any((k / "cublas" / "bin").glob("cublas64_12*.dll"))
+                    and any((k / "cudnn" / "bin").glob("cudnn64_9*.dll"))):
+                return k
+        except OSError:
+            continue
+    return None
+
+
+def gpu_paket_testen():
+    """Lädt cuBLAS und cuDNN probeweise. Gibt None zurück, wenn alles da ist, sonst den Fehler."""
+    nvidia_dlls_einbinden()
+    gefunden = {}
+    for o in _gpu_bin_ordner():
+        for p in o.glob("*.dll"):
+            gefunden.setdefault(p.name.lower(), p)
+    for muster in ("cublas64_12", "cudnn64_9"):
+        pfad = next((p for n, p in gefunden.items() if n.startswith(muster)), None)
+        if pfad is None:
+            return f"{muster}.dll fehlt"
+        try:
+            ctypes.WinDLL(str(pfad))
+        except OSError as e:
+            return f"{pfad.name}: {e}"
+    return None
+
+
+def _kopieren_mit_fortschritt(dateien, ziel_von, melden):
+    gesamt = sum(q.stat().st_size for q, _ in dateien) or 1
+    fertig = 0
+    for quelle, ziel in dateien:
+        ziel.parent.mkdir(parents=True, exist_ok=True)
+        with open(quelle, "rb") as ein, open(ziel, "wb") as aus:
+            while True:
+                block = ein.read(4 << 20)
+                if not block:
+                    break
+                aus.write(block)
+                fertig += len(block)
+                melden(anteil=fertig / gesamt)
+
+
+def gpu_paket_einrichten(quelle=None, melden=lambda **k: None):
+    """Richtet das GPU-Paket in %LOCALAPPDATA%\\Transcriber\\gpu ein: aus einer vorhandenen
+    Python-Installation kopiert (quelle) oder die Pakete von PyPI geladen (nur bin-Ordner)."""
+    import hashlib
+    import shutil
+    import urllib.request
+    import zipfile
+
+    ziel = GPU_ORDNER / "nvidia"
+    teil = GPU_ORDNER / "nvidia.part"
+    shutil.rmtree(teil, ignore_errors=True)
+    teil.mkdir(parents=True)
+
+    if quelle:
+        quelle = Path(quelle)
+        melden(schritt=f"Kopiere GPU-Dateien aus {quelle} …")
+        dateien = [(p, teil / p.relative_to(quelle)) for p in quelle.glob("*/bin/*") if p.is_file()]
+        _kopieren_mit_fortschritt(dateien, quelle, melden)
+    else:
+        laden = GPU_ORDNER / "download"
+        laden.mkdir(parents=True, exist_ok=True)
+        plan = []
+        for paket, version in GPU_PAKETE:
+            with urllib.request.urlopen(f"https://pypi.org/pypi/{paket}/{version}/json", timeout=30) as r:
+                info = json.load(r)
+            datei = next(u for u in info["urls"] if u["filename"].endswith("win_amd64.whl"))
+            plan.append(datei)
+        gesamt = sum(d["size"] for d in plan)
+        geladen = 0
+        for d in plan:
+            melden(schritt=f"Lade {d['filename']} ({groesse_text(d['size'])}) …")
+            whl = laden / d["filename"]
+            sha = hashlib.sha256()
+            with urllib.request.urlopen(d["url"], timeout=60) as r, open(whl, "wb") as aus:
+                while True:
+                    block = r.read(1 << 20)
+                    if not block:
+                        break
+                    aus.write(block)
+                    sha.update(block)
+                    geladen += len(block)
+                    melden(anteil=geladen / gesamt * 0.95)
+            if sha.hexdigest() != d["digests"]["sha256"]:
+                raise RuntimeError(f"Prüfsumme von {d['filename']} stimmt nicht – Download beschädigt.")
+            melden(schritt=f"Entpacke {d['filename']} …")
+            with zipfile.ZipFile(whl) as z:
+                for name in z.namelist():
+                    teile = name.split("/")
+                    if len(teile) == 4 and teile[0] == "nvidia" and teile[2] == "bin" and teile[3]:
+                        z.extract(name, laden / "x")
+            for p in (laden / "x" / "nvidia").glob("*/bin/*"):
+                z_pfad = teil / p.relative_to(laden / "x" / "nvidia")
+                z_pfad.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(p), z_pfad)
+            shutil.rmtree(laden / "x", ignore_errors=True)
+            whl.unlink()
+        shutil.rmtree(laden, ignore_errors=True)
+
+    melden(schritt="Prüfe GPU-Dateien …", anteil=1.0)
+    shutil.rmtree(ziel, ignore_errors=True)
+    teil.rename(ziel)
+    fehler = gpu_paket_testen()
+    if fehler:
+        raise RuntimeError(f"GPU-Paket eingerichtet, aber nicht ladbar: {fehler}")
+
+
+# Umwandlungs-Paket (Transformers-Modelle -> CTranslate2); getestete Versionen
+UMWANDLUNG_PAKETE = ["torch==2.15.0", "transformers==5.24.1"]
+
+
+def umwandlung_vorhanden() -> bool:
+    return (UMWANDLUNG_ORDNER / "transformers").is_dir() and (UMWANDLUNG_ORDNER / "torch").is_dir()
+
+
+def umwandlung_einrichten(melden=lambda **k: None):
+    """Installiert transformers + torch (CPU) mit pip nach %LOCALAPPDATA%\\Transcriber\\umwandlung."""
+    import shutil
+    teil = UMWANDLUNG_ORDNER.with_name(UMWANDLUNG_ORDNER.name + ".part")
+    shutil.rmtree(teil, ignore_errors=True)
+    python = Path(sys.executable).with_name("python.exe")
+    if not python.exists():
+        python = Path(sys.executable)
+    befehl = [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+              "--only-binary=:all:", "--no-warn-script-location", "--target", str(teil), *UMWANDLUNG_PAKETE]
+    melden(schritt="Lade transformers und torch (CPU) …")
+    proc = subprocess.Popen(befehl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", **_ohne_fenster())
+    letzte = []
+    for zeile in proc.stdout:
+        zeile = zeile.strip()
+        if not zeile:
+            continue
+        letzte = (letzte + [zeile])[-15:]
+        if zeile.startswith(("Downloading", "Collecting", "Installing", "Successfully")):
+            melden(schritt=zeile[:150])
+    if proc.wait() != 0:
+        raise RuntimeError("pip ist fehlgeschlagen:\n" + "\n".join(letzte[-6:]))
+    shutil.rmtree(UMWANDLUNG_ORDNER, ignore_errors=True)
+    teil.rename(UMWANDLUNG_ORDNER)
+
+
+PREPROCESSOR_STANDARD = {
+    "chunk_length": 30, "feature_extractor_type": "WhisperFeatureExtractor", "hop_length": 160,
+    "n_fft": 400, "n_samples": 480000, "nb_max_frames": 3000, "padding_side": "right",
+    "padding_value": 0.0, "processor_class": "WhisperProcessor", "return_attention_mask": False,
+    "sampling_rate": 16000,
+}
+
+
+def umwandeln(quelle, repo: str = "", melden=lambda **k: None) -> Path:
+    """Wandelt ein Whisper-Modell im Transformers-Format ins CTranslate2-Format um
+    (-> Ordner «modelle»). Braucht das Umwandlungs-Paket; läuft in einem eigenen Prozess."""
+    import datetime
+    import shutil
+    quelle = Path(quelle)
+    cfg = json.loads((quelle / "config.json").read_text(encoding="utf-8"))
+    if cfg.get("model_type") != "whisper":
+        raise RuntimeError(f"Kein Whisper-Modell (model_type = {cfg.get('model_type')!r}).")
+    n_mels = int(cfg.get("num_mel_bins") or 80)
+
+    ziel = umgewandelt_ordner(repo) if repo else MODELL_ORDNER / f"{quelle.name}-ct2"
+    teil = ziel.with_name(ziel.name + ".part")
+    shutil.rmtree(teil, ignore_errors=True)
+    MODELL_ORDNER.mkdir(parents=True, exist_ok=True)
+
+    melden(schritt="Lade das Modell (das dauert einen Moment) …", anteil=0.05)
+    if str(UMWANDLUNG_ORDNER) not in sys.path:
+        sys.path.insert(0, str(UMWANDLUNG_ORDNER))
+    from ctranslate2.converters import TransformersConverter
+    kopieren = [f for f in ("tokenizer.json",) if (quelle / f).is_file()]
+    melden(schritt="Wandle ins CTranslate2-Format um (float16) …", anteil=0.2)
+    TransformersConverter(str(quelle), copy_files=kopieren, load_as_float16=True).convert(
+        str(teil), quantization="float16", force=True)
+
+    melden(schritt="Schreibe preprocessor_config.json und Sprach-Einstellungen …", anteil=0.9)
+    # preprocessor_config.json: feature_size muss num_mel_bins sein (large-v3 = 128), sonst falsche Texte
+    pre = {}
+    if (quelle / "preprocessor_config.json").is_file():
+        pre = json.loads((quelle / "preprocessor_config.json").read_text(encoding="utf-8"))
+    elif (quelle / "processor_config.json").is_file():
+        pc = json.loads((quelle / "processor_config.json").read_text(encoding="utf-8"))
+        pre = dict(pc.get("feature_extractor") or {})
+    pre = {**PREPROCESSOR_STANDARD, **pre, "feature_size": n_mels}
+    (teil / "preprocessor_config.json").write_text(json.dumps(pre, indent=2), encoding="utf-8")
+
+    # lang_ids, suppress_ids, suppress_ids_begin, alignment_heads direkt aus generation_config.json
+    # (neue transformers-Versionen reichen sie nicht mehr weiter -> sonst stürzt die Spracherkennung ab)
+    ct = json.loads((teil / "config.json").read_text(encoding="utf-8"))
+    gen_pfad = quelle / "generation_config.json"
+    if gen_pfad.is_file():
+        gen = json.loads(gen_pfad.read_text(encoding="utf-8"))
+        if gen.get("lang_to_id"):
+            ct["lang_ids"] = sorted(gen["lang_to_id"].values())
+        if gen.get("suppress_tokens") is not None:
+            ct["suppress_ids"] = gen["suppress_tokens"]
+        if gen.get("begin_suppress_tokens") is not None:
+            ct["suppress_ids_begin"] = gen["begin_suppress_tokens"]
+        if gen.get("alignment_heads"):
+            ct["alignment_heads"] = gen["alignment_heads"]
+    if not ct.get("lang_ids"):
+        raise RuntimeError("Keine Sprach-IDs gefunden (lang_ids) – Spracherkennung würde abstürzen.")
+    (teil / "config.json").write_text(json.dumps(ct, indent=2), encoding="utf-8")
+    (teil / "quelle.json").write_text(json.dumps({
+        "repo": repo, "quelle": str(quelle), "mel": n_mels,
+        "umgewandelt": datetime.datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
+
+    shutil.rmtree(ziel, ignore_errors=True)
+    teil.rename(ziel)
+    melden(schritt="Fertig umgewandelt.", anteil=1.0)
+    return ziel
+
+
 def gpu_name() -> str:
     try:
         aus = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -335,7 +570,11 @@ def modell_liste() -> list:
                 pass
             name = repo or ordner.name
             if ist_ct2(ordner):
-                liste.append(Modell(name, "eigen", "bereit", pfad=str(ordner), repo=repo,
+                try:
+                    g = groesse_text((ordner / "model.bin").stat().st_size)
+                except OSError:
+                    g = ""
+                liste.append(Modell(name, "eigen", "bereit", pfad=str(ordner), repo=repo, groesse=g,
                                     beschreibung="eigenes Modell" if not repo else "umgewandelt"))
             elif ist_transformers(ordner):
                 liste.append(Modell(name, "eigen", "umwandeln", roh_pfad=str(ordner), repo=repo,
@@ -420,11 +659,10 @@ def herunterladen(repo: str, muster=None) -> str:
     return huggingface_hub.snapshot_download(repo, allow_patterns=muster)
 
 
-def download_starten(repo: str, protokoll: Path) -> subprocess.Popen:
-    """Startet den Download in einem eigenen Prozess (lässt sich sauber abbrechen; angefangene
-    Dateien werden beim nächsten Mal fortgesetzt). Der Prozess schreibt ins Protokoll:
-      GESAMT <bytes>   FERTIG <ordner>   FEHLER <text>
-    Fortschritt: cache_bytes(repo) im Vergleich zu GESAMT."""
+def prozess_starten(argumente, protokoll: Path) -> subprocess.Popen:
+    """Startet kern.py mit argumente in einem eigenen Prozess ohne Fenster (lässt sich sauber
+    abbrechen). Der Prozess schreibt Zeilen ins Protokoll:
+      GESAMT <bytes>  SCHRITT <text>  ANTEIL <0..1>  FERTIG <ergebnis>  FEHLER <text>"""
     python = Path(sys.executable)
     konsole = python.with_name("python.exe")
     if konsole.exists():
@@ -432,9 +670,15 @@ def download_starten(repo: str, protokoll: Path) -> subprocess.Popen:
     protokoll.parent.mkdir(parents=True, exist_ok=True)
     umgebung = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", PYTHONUTF8="1")
     with open(protokoll, "w", encoding="utf-8") as aus:
-        return subprocess.Popen([str(python), str(Path(__file__).resolve()), "--download", repo],
+        return subprocess.Popen([str(python), str(Path(__file__).resolve()), *argumente],
                                 stdout=aus, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                                 env=umgebung, **_ohne_fenster())
+
+
+def download_starten(repo: str, protokoll: Path) -> subprocess.Popen:
+    """Download in eigenem Prozess; angefangene Dateien werden beim nächsten Mal fortgesetzt.
+    Fortschritt: cache_bytes(repo) im Vergleich zu GESAMT."""
+    return prozess_starten(["--download", repo], protokoll)
 
 
 def groesse_text(b: float) -> str:
@@ -630,6 +874,30 @@ def _cli():
             print(f"FERTIG {herunterladen(args[1], muster)}", flush=True)
         except Exception as e:
             print(f"FEHLER {fehler_text(e)}", flush=True)
+            sys.exit(1)
+        return
+    if args and args[0] in ("--gpu-paket", "--umwandlung-einrichten", "--umwandeln"):
+        zuletzt = {"anteil": -1.0}
+
+        def melden(schritt=None, anteil=None):
+            if schritt:
+                print(f"SCHRITT {schritt}", flush=True)
+            if anteil is not None and (anteil - zuletzt["anteil"] >= 0.002 or anteil >= 1):
+                zuletzt["anteil"] = anteil
+                print(f"ANTEIL {anteil:.4f}", flush=True)
+        try:
+            if args[0] == "--gpu-paket":
+                gpu_paket_einrichten(args[1] if len(args) > 1 else None, melden)
+                ergebnis = str(GPU_ORDNER)
+            elif args[0] == "--umwandlung-einrichten":
+                umwandlung_einrichten(melden)
+                ergebnis = str(UMWANDLUNG_ORDNER)
+            else:
+                ergebnis = str(umwandeln(args[1], args[2] if len(args) > 2 else "", melden))
+            print(f"FERTIG {ergebnis}", flush=True)
+        except Exception as e:
+            text = fehler_text(e) if "urlopen" in repr(e) or "connect" in str(e).lower() else f"{e}"
+            print(f"FEHLER {text}".replace("\n", " | "), flush=True)
             sys.exit(1)
         return
     if args and args[0] == "--test":
