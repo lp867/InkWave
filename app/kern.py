@@ -353,20 +353,24 @@ def modell_liste() -> list:
             repos[teile.replace("--", "/", 1)] = None
     except OSError:
         pass
-    for repo in einstellungen_lesen().get("hf_modelle", []):
+    e = einstellungen_lesen()
+    for repo in e.get("hf_modelle", []):
         repos.setdefault(repo, None)
+    groessen = e.get("hf_groessen", {})
     for repo in sorted(repos, key=str.lower):
         if repo.lower() in gesehen:
             continue
         snap = _cache_snapshot(repo)
+        g = groesse_text(groessen[repo]) if groessen.get(repo) else ""
         if snap is not None and ist_ct2(snap):
-            liste.append(Modell(repo, "cache", "bereit", pfad=str(snap), repo=repo,
+            liste.append(Modell(repo, "cache", "bereit", pfad=str(snap), repo=repo, groesse=g,
                                 beschreibung="aus dem Hugging-Face-Cache"))
         elif snap is not None and ist_transformers(snap):
-            liste.append(Modell(repo, "cache", "umwandeln", roh_pfad=str(snap), repo=repo,
+            liste.append(Modell(repo, "cache", "umwandeln", roh_pfad=str(snap), repo=repo, groesse=g,
                                 beschreibung="Transformers-Format, muss umgewandelt werden"))
         else:
-            liste.append(Modell(repo, "cache", "fehlt", repo=repo, beschreibung="noch nicht heruntergeladen"))
+            liste.append(Modell(repo, "cache", "fehlt", repo=repo, groesse=g,
+                                beschreibung="noch nicht heruntergeladen"))
     return liste
 
 
@@ -416,16 +420,69 @@ def herunterladen(repo: str, muster=None) -> str:
     return huggingface_hub.snapshot_download(repo, allow_patterns=muster)
 
 
-def download_starten(repo: str) -> subprocess.Popen:
-    """Startet den Download in einem eigenen Prozess (lässt sich sauber abbrechen).
-    Fortschritt: cache_bytes(repo) im Vergleich zu download_plan(repo)[1]."""
+def download_starten(repo: str, protokoll: Path) -> subprocess.Popen:
+    """Startet den Download in einem eigenen Prozess (lässt sich sauber abbrechen; angefangene
+    Dateien werden beim nächsten Mal fortgesetzt). Der Prozess schreibt ins Protokoll:
+      GESAMT <bytes>   FERTIG <ordner>   FEHLER <text>
+    Fortschritt: cache_bytes(repo) im Vergleich zu GESAMT."""
     python = Path(sys.executable)
     konsole = python.with_name("python.exe")
     if konsole.exists():
         python = konsole
-    return subprocess.Popen([str(python), str(Path(__file__).resolve()), "--download", repo],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            encoding="utf-8", errors="replace", **_ohne_fenster())
+    protokoll.parent.mkdir(parents=True, exist_ok=True)
+    umgebung = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", PYTHONUTF8="1")
+    with open(protokoll, "w", encoding="utf-8") as aus:
+        return subprocess.Popen([str(python), str(Path(__file__).resolve()), "--download", repo],
+                                stdout=aus, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                env=umgebung, **_ohne_fenster())
+
+
+def groesse_text(b: float) -> str:
+    if b >= 1e9:
+        return f"{b / 1e9:.1f} GB"
+    if b >= 1e6:
+        return f"{b / 1e6:.0f} MB"
+    return f"{b / 1e3:.0f} kB"
+
+
+def fehler_text(e: Exception) -> str:
+    """Verständliche Meldung für Fehler beim Herunterladen / Nachschlagen auf Hugging Face."""
+    name = type(e).__name__
+    if name == "RepositoryNotFoundError":
+        return "Modell nicht gefunden – Name falsch geschrieben oder privat?"
+    if name == "GatedRepoError":
+        return "Dieses Modell muss zuerst auf huggingface.co freigegeben werden (Anmeldung nötig)."
+    if name in ("LocalEntryNotFoundError", "ConnectionError", "ConnectError", "OfflineModeIsEnabled",
+                "Timeout", "ReadTimeout", "ConnectTimeout") or "connect" in str(e).lower():
+        return "Keine Verbindung zu Hugging Face – besteht eine Internetverbindung?"
+    return f"{name}: {str(e)[:200]}"
+
+
+def hf_modell_pruefen(repo: str) -> dict:
+    """Schlägt ein Hugging-Face-Modell nach (Internet). Ergebnis: format ("ct2" / "transformers"),
+    gesamt (Bytes), whisper (bool). Wirft bei Fehlern."""
+    from huggingface_hub import HfApi
+    info = HfApi().model_info(repo, files_metadata=True)
+    namen = {s.rfilename for s in info.siblings}
+    _, gesamt = download_plan(repo)
+    if "model.bin" in namen:
+        fmt = "ct2"
+    elif any(n.endswith(".safetensors") or n.startswith("pytorch_model") for n in namen):
+        fmt = "transformers"
+    else:
+        fmt = "unbekannt"
+    typ = ((info.config or {}).get("model_type") or "").lower()
+    whisper = fmt == "ct2" or typ == "whisper" or "whisper" in repo.lower()
+    return {"repo": info.id, "format": fmt, "gesamt": gesamt, "whisper": whisper}
+
+
+def hf_modell_merken(repo: str, gesamt: int = 0):
+    e = einstellungen_lesen()
+    liste = e.get("hf_modelle", [])
+    groessen = e.get("hf_groessen", {})
+    if gesamt:
+        groessen[repo] = gesamt
+    einstellungen_speichern(hf_modelle=liste + ([repo] if repo not in liste else []), hf_groessen=groessen)
 
 
 # ---------------------------------------------------------------- Modell laden
@@ -567,7 +624,13 @@ def _cli():
     """Hilfsaufrufe: --download REPO (für den Download-Prozess) und --test DATEI [MODELL] [GERÄT]."""
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "--download":
-        print(herunterladen(args[1]), flush=True)
+        try:
+            muster, gesamt = download_plan(args[1])
+            print(f"GESAMT {gesamt}", flush=True)
+            print(f"FERTIG {herunterladen(args[1], muster)}", flush=True)
+        except Exception as e:
+            print(f"FEHLER {fehler_text(e)}", flush=True)
+            sys.exit(1)
         return
     if args and args[0] == "--test":
         datei = Path(args[1])

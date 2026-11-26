@@ -302,8 +302,14 @@ class Hauptfenster(QMainWindow):
         self.chk_schonend = QCheckBox("Schonend rechnen")
         self.chk_schonend.setToolTip("Niedrigere Priorität: der PC bleibt gut bedienbar, "
                                      "die Transkription dauert etwas länger.")
+        self.btn_modelle = QPushButton("Modelle …")
+        self.btn_modelle.setToolTip("Modelle herunterladen, Hugging-Face-Modelle hinzufügen")
+        self.btn_modelle.clicked.connect(lambda: self.modelle_oeffnen())
+        modell_zeile = QHBoxLayout()
+        modell_zeile.addWidget(self.cb_modell, 1)
+        modell_zeile.addWidget(self.btn_modelle)
         g.addWidget(QLabel("Modell"), 0, 0)
-        g.addWidget(self.cb_modell, 0, 1, 1, 3)
+        g.addLayout(modell_zeile, 0, 1, 1, 3)
         g.addWidget(QLabel("Sprache"), 1, 0)
         g.addWidget(self.cb_sprache, 1, 1)
         g.addWidget(QLabel("Rechnen auf"), 1, 2)
@@ -403,6 +409,15 @@ class Hauptfenster(QMainWindow):
         self.protokollieren(f"Daten-Ordner: {kern.DATEN}")
         self.protokollieren(self.lbl_hardware.text().replace("⚡ ", "Grafikkarte: "))
         self.modelle_fuellen(info["modelle"])
+        if not kern.einstellungen_lesen().get("eingerichtet"):
+            QTimer.singleShot(200, lambda: self.modelle_oeffnen(erster_start=True))
+
+    def modelle_oeffnen(self, erster_start=False):
+        from modelle_dialog import ModellDialog
+        dialog = ModellDialog(self, self.gpu, erster_start)
+        dialog.exec()
+        self.modelle_fuellen()
+        dialog.deleteLater()
 
     def modelle_fuellen(self, modelle=None):
         letztes = self.cb_modell.currentData() or kern.einstellungen_lesen().get("modell")
@@ -432,9 +447,9 @@ class Hauptfenster(QMainWindow):
         if wahl:
             self.cb_modell.setCurrentIndex(self.cb_modell.findData(wahl))
         self.cb_modell.blockSignals(False)
-        self.cb_modell.setToolTip("✓ = heruntergeladen. Weitere Modelle: Menü «Modelle» (folgt).")
+        self.cb_modell.setToolTip("✓ = heruntergeladen. Weitere Modelle: «Modelle …»")
         if not bereit:
-            self.lbl_status.setText("Noch kein Modell heruntergeladen.")
+            self.lbl_status.setText("Noch kein Modell heruntergeladen – «Modelle …» öffnen.")
         self._knoepfe_aktualisieren()
 
     # ------------------------------------------------------------ Dateien
