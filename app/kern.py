@@ -65,6 +65,10 @@ class KeineSprache(Exception):
     """In der Datei wurde keine Sprache gefunden (z. B. stille Aufnahme)."""
 
 
+class KeineTonspur(Exception):
+    """Die Datei ist keine lesbare Audio-/Videodatei oder hat keine Tonspur."""
+
+
 # ---------------------------------------------------------------- Einstellungen, Dateien
 
 def einstellungen_lesen() -> dict:
@@ -484,12 +488,28 @@ class Ergebnis:
         return self.dauer / max(self.benoetigt, 0.1)
 
 
+def tonspur_pruefen(datei: Path):
+    """Öffnet die Datei kurz mit PyAV. Wirft KeineTonspur, wenn sie nicht lesbar ist oder keinen Ton hat
+    (z. B. eine .txt, die wegen ausgeblendeter Endungen wie eine .mp3 aussah)."""
+    import av
+    try:
+        with av.open(str(datei)) as container:
+            if not container.streams.audio:
+                raise KeineTonspur("Keine Tonspur in der Datei.")
+    except KeineTonspur:
+        raise
+    except Exception as e:
+        raise KeineTonspur(f"Datei kann nicht gelesen werden – keine Audio- oder Videodatei? "
+                           f"({type(e).__name__})") from e
+
+
 def transkribieren(modell, batch, datei: Path, sprache=None, srt=False, zeitstempel=False,
                    melden=lambda *a, **k: None, abbrechen: threading.Event | None = None) -> Ergebnis:
     """Eine Datei -> output\\name.txt (+ .srt). sprache=None: automatisch erkennen.
     melden-Arten: "sprache" (sprache, wahrscheinlichkeit), "fortschritt" (anteil, position, dauer),
     "segment" (text, start, ende)."""
     start = time.time()
+    tonspur_pruefen(datei)
     try:
         if batch is not None:
             # GPU: mehrere Abschnitte gleichzeitig -> deutlich schneller (VAD ist hier immer an)

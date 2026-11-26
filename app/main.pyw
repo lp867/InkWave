@@ -1,73 +1,98 @@
-"""Schritt 0 – Testfenster: prüft, ob Smart App Control die Transcriber.exe samt Python und allen
-Paketen (PySide6, ctranslate2, PyAV, onnxruntime, ...) laufen lässt. Wird später durch die echte App ersetzt."""
+"""Einstieg des Transcribers. Wird vom Starter (Transcriber.exe) mit pythonw.exe gestartet:
+
+    pythonw.exe app\\main.pyw [Dateien oder Ordner ...]
+
+Ohne Konsole gibt es kein stdout/stderr – alles Unerwartete landet in
+%LOCALAPPDATA%\\Transcriber\\fehler.log und wird als Meldung angezeigt.
+"""
 
 import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
 
-LOG = Path(os.environ.get("LOCALAPPDATA", ".")) / "Transcriber" / "sac_test.log"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+LOG = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Transcriber" / "fehler.log"
 
 
-def log(text: str):
+def _log_datei():
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {text}\n")
+    return open(LOG, "a", encoding="utf-8", buffering=1)
 
 
-def pruefen() -> list[str]:
-    zeilen = [f"Python {sys.version.split()[0]}  ({sys.executable})"]
-    for modul in ("PySide6", "numpy", "av", "ctranslate2", "onnxruntime", "tokenizers",
-                  "huggingface_hub", "faster_whisper"):
-        try:
-            m = __import__(modul)
-            zeilen.append(f"✓ {modul} {getattr(m, '__version__', '?')}")
-        except Exception as e:
-            zeilen.append(f"✗ {modul}: {type(e).__name__}: {e}")
+# pythonw: stdout/stderr fehlen -> Bibliotheken, die etwas ausgeben (tqdm, Warnungen), würden abstürzen
+if sys.stdout is None or sys.stderr is None:
     try:
-        import ctranslate2
-        zeilen.append(f"CUDA-Geräte: {ctranslate2.get_cuda_device_count()}")
-    except Exception as e:
-        zeilen.append(f"CUDA-Prüfung: {e}")
-    zeilen.append(f"Daten-Ordner (neben der exe): {os.environ.get('TRANSCRIBER_DATA', '-')}")
-    zeilen.append(f"Argumente: {sys.argv[1:]}")
-    return zeilen
+        _ausgabe = _log_datei()
+    except OSError:
+        _ausgabe = open(os.devnull, "w", encoding="utf-8")
+    sys.stdout = sys.stdout or _ausgabe
+    sys.stderr = sys.stderr or _ausgabe
 
 
-def main():
-    log("Start")
+def fehler_melden(text: str):
     try:
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
+        with _log_datei() as f:
+            f.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')}\n{text}\n")
+    except OSError:
+        pass
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        if QApplication.instance() is not None:
+            QMessageBox.critical(None, "Transcriber – Fehler",
+                                 f"{text.strip().splitlines()[-1]}\n\nDetails stehen in:\n{LOG}")
+            return
     except Exception:
-        log("PySide6 fehlt:\n" + traceback.format_exc())
-        raise
-    app = QApplication(sys.argv)
-    zeilen = pruefen()
-    log(" | ".join(zeilen))
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, text[-1500:], "Transcriber – Fehler", 0x10)
+    except Exception:
+        pass
 
-    fenster = QWidget()
-    fenster.setWindowTitle("Transcriber – Test")
-    layout = QVBoxLayout(fenster)
-    text = QLabel("Smart-App-Control-Test bestanden, wenn du das hier siehst:\n\n" + "\n".join(zeilen))
-    text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    layout.addWidget(text)
-    knopf = QPushButton("Schliessen")
-    knopf.clicked.connect(fenster.close)
-    layout.addWidget(knopf)
-    fenster.resize(620, 320)
+
+def _ausnahme(typ, wert, tb):
+    fehler_melden("".join(traceback.format_exception(typ, wert, tb)))
+
+
+def _thread_ausnahme(args):
+    fehler_melden("".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)))
+
+
+def main() -> int:
+    sys.excepthook = _ausnahme
+    threading.excepthook = _thread_ausnahme
+    try:
+        # eigenes Symbol in der Taskleiste statt dem von Python
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Elias.Transcriber")
+    except Exception:
+        pass
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    app = QApplication(sys.argv)
+    app.setApplicationName("Transcriber")
+
+    import kern
+    problem = kern.av_version_pruefen()
+    if problem:
+        QMessageBox.critical(None, "Transcriber", problem)
+        return 1
+
+    import gui
+    fenster = gui.Hauptfenster(sys.argv[1:])
     fenster.show()
-    code = app.exec()
-    log("Ende")
-    sys.exit(code)
+    return app.exec()
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except SystemExit:
         raise
     except Exception:
-        log("Fehler:\n" + traceback.format_exc())
-        raise
+        fehler_melden(traceback.format_exc())
+        sys.exit(1)

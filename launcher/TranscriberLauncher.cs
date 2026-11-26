@@ -1,4 +1,4 @@
-// Transcriber.exe: startet den Transcriber. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
+﻿// Transcriber.exe: startet den Transcriber. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
 // (siehe build.py), gleiches Prinzip wie bei SkyWave:
 // - Portabler Ordner: python\pythonw.exe und app\ liegen neben der exe -> direkt starten.
 // - Einzelne Datei (Transcriber-<Version>.exe): Python, Pakete und App stecken als ZIP in der exe
@@ -21,8 +21,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Transcriber")]
 [assembly: AssemblyProduct("Transcriber")]
 [assembly: AssemblyDescription("Audio und Video lokal in Text umwandeln")]
-[assembly: AssemblyVersion("0.1.0.0")]
-[assembly: AssemblyFileVersion("0.1.0.0")]
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
 
 static class TranscriberLauncher
 {
