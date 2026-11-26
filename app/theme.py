@@ -60,6 +60,7 @@ QPushButton#link { background: transparent; border: none; color: $akzent_text; p
 QPushButton#link:hover { background: $akzent_weich; border-radius: 8px; }
 QPushButton#link:disabled { color: $gedaempft; }
 
+QComboBox { combobox-popup: 0; }   /* Liste mit höchstens maxVisibleItems Einträgen, dann scrollen */
 QComboBox, QLineEdit { background: $feld; border: 1px solid $feld_rand; border-radius: 9px; padding: 6px 10px;
                        min-height: 22px; selection-background-color: $akzent; selection-color: white; }
 QComboBox:hover, QLineEdit:hover, QComboBox:focus, QLineEdit:focus { border-color: $akzent; }

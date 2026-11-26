@@ -34,10 +34,7 @@ GERAETE = [("auto", "Automatisch"), ("cuda", "Grafikkarte (GPU)"), ("cpu", "Proz
 
 
 def sprach_name(code: str) -> str:
-    for c, name in kern.SPRACHEN:
-        if c == code:
-            return name
-    return code
+    return kern.SPRACH_NAMEN.get(code, code)
 
 
 def logo_pixmap(widget, groesse: int):
@@ -88,8 +85,7 @@ class Arbeiter(QObject):
     def _melden(self, art, **d):
         if art in ("status", "warnung"):
             self.protokoll.emit(d["text"])
-            if art == "status":
-                self.status.emit(d["text"])
+            self.status.emit(d["text"])
 
     @Slot()
     def pruefen(self):
@@ -449,12 +445,16 @@ class Hauptfenster(QMainWindow):
         lay.addWidget(self.lbl_modell_info)
 
         lay.addWidget(beschriftung("Sprache", "gedaempft"))
-        self.cb_sprache = QComboBox()
-        self.cb_sprache.setEditable(True)
-        for code, name in kern.SPRACHEN:
-            self.cb_sprache.addItem(name if not code else f"{code} – {name}", code)
-        self.cb_sprache.setToolTip("Automatisch erkennen oder fest einstellen.\n"
-                                   "Auch andere Whisper-Kürzel gehen, z. B. «ja» oder «sv».")
+        self.cb_sprache = QComboBox()             # nur auswählen, nicht tippen (keine Tippfehler)
+        self.cb_sprache.setMaxVisibleItems(16)
+        for code, name in kern.sprach_auswahl():
+            if code == "-":
+                self.cb_sprache.insertSeparator(self.cb_sprache.count())
+            else:
+                self.cb_sprache.addItem(name, code)
+        self.cb_sprache.setToolTip("Automatisch erkennen oder fest einstellen – alle 100 Sprachen von Whisper.\n"
+                                   "Für das Schweizer Modell (Flix): «Automatisch» oder «Deutsch».\n"
+                                   "Tipp: Liste offen und Anfangsbuchstaben tippen springt zur Sprache.")
         lay.addWidget(self.cb_sprache)
         lay.addSpacing(4)
 
@@ -534,10 +534,7 @@ class Hauptfenster(QMainWindow):
         e = kern.einstellungen_lesen()
         code = e.get("sprache", "")
         i = self.cb_sprache.findData(code)
-        if i >= 0:
-            self.cb_sprache.setCurrentIndex(i)
-        else:
-            self.cb_sprache.setEditText(code)
+        self.cb_sprache.setCurrentIndex(i if i >= 0 else 0)
         i = self.cb_geraet.findData(e.get("geraet", "auto"))
         self.cb_geraet.setCurrentIndex(max(i, 0))
         self.chk_srt.setChecked(bool(e.get("srt", False)))
@@ -545,10 +542,7 @@ class Hauptfenster(QMainWindow):
         self.chk_schonend.setChecked(bool(e.get("schonend", False)))
 
     def _einstellungen_speichern(self):
-        try:
-            sprache = self._sprache_code() or ""
-        except ValueError:
-            sprache = ""
+        sprache = self._sprache_code() or ""
         kern.einstellungen_speichern(
             sprache=sprache,
             geraet=self.cb_geraet.currentData(), srt=self.chk_srt.isChecked(),
@@ -733,19 +727,8 @@ class Hauptfenster(QMainWindow):
     # ------------------------------------------------------------ Starten / Abbrechen
 
     def _sprache_code(self):
-        """None = automatisch, sonst Whisper-Kürzel. Wirft ValueError bei Unbekanntem."""
-        text = self.cb_sprache.currentText().strip()
-        i = self.cb_sprache.currentIndex()
-        if i >= 0 and text == self.cb_sprache.itemText(i):
-            code = self.cb_sprache.itemData(i)
-        else:
-            code = text.split("–")[0].strip().lower()
-        if not code or code.startswith("automatisch"):
-            return None
-        from faster_whisper.tokenizer import _LANGUAGE_CODES
-        if code not in _LANGUAGE_CODES:
-            raise ValueError(f"Unbekannte Sprache «{code}». Beispiele: de, en, fr, it, es.")
-        return code
+        """None = automatisch, sonst Whisper-Kürzel (nur aus der Liste wählbar)."""
+        return self.cb_sprache.currentData() or None
 
     def _knoepfe_aktualisieren(self):
         n = self.liste.topLevelItemCount()
@@ -769,11 +752,8 @@ class Hauptfenster(QMainWindow):
         self.lbl_prozent.setText(f"{round(anteil * 100)} %")
 
     def starten(self):
-        try:
-            sprache = self._sprache_code()
-        except ValueError as e:
-            QMessageBox.warning(self, APP_NAME, str(e))
-            return
+        sprache = self._sprache_code()
+        self._hardware_anzeigen()                 # GPU-Paket vor jedem Start neu prüfen
         modell = self.cb_modell.currentData()
         if not modell:
             QMessageBox.information(self, APP_NAME, "Bitte zuerst ein Modell herunterladen.")
@@ -817,8 +797,11 @@ class Hauptfenster(QMainWindow):
         self.txt_protokoll.appendPlainText(f"{time.strftime('%H:%M:%S')}  {text}")
 
     def _geraet_bereit(self, dev):
-        if dev == "cpu" and self.gpu and self.cb_geraet.currentData() != "cpu":
-            self.protokollieren("Hinweis: läuft auf der CPU, weil die GPU nicht nutzbar ist.")
+        self.hinweis = ""
+        if dev == "cpu" and self.cb_geraet.currentData() != "cpu" and (self.gpu or self.cb_geraet.currentData() == "cuda"):
+            self.hinweis = "Hinweis: lief auf der CPU, weil die GPU nicht nutzbar war (Details im Protokoll)."
+            self.protokollieren(self.hinweis)
+        self._hardware_anzeigen()
 
     def _datei_start(self, zeile):
         item = self.liste.topLevelItem(zeile)
@@ -897,7 +880,8 @@ class Hauptfenster(QMainWindow):
         else:
             self._gesamt(1.0)
             self.lbl_status.setText(f"✓ Alles erledigt: {fertig} fertig" + (f", {fehler} mit Problem" if fehler else "")
-                                    + ". Die Texte liegen im Output-Ordner.")
+                                    + ". Die Texte liegen im Output-Ordner."
+                                    + (f"\n{self.hinweis}" if getattr(self, "hinweis", "") else ""))
         self.protokollieren("Abgebrochen." if abgebrochen else "Erledigt.")
 
     # ------------------------------------------------------------ Schliessen

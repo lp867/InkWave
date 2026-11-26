@@ -43,9 +43,43 @@ MODELLE = [
 ]
 EMPFEHLUNG = {"cuda": "large-v3-turbo", "cpu": "small"}
 
-SPRACHEN = [("", "Automatisch erkennen"), ("de", "Deutsch"), ("en", "Englisch"), ("fr", "Französisch"),
-            ("it", "Italienisch"), ("es", "Spanisch"), ("pt", "Portugiesisch"), ("nl", "Niederländisch"),
-            ("pl", "Polnisch"), ("tr", "Türkisch"), ("ru", "Russisch"), ("uk", "Ukrainisch")]
+# Alle Sprachen, die Whisper kennt, mit deutschem Namen. Oben in der Auswahl: HAEUFIGE_SPRACHEN.
+SPRACH_NAMEN = {
+    "af": "Afrikaans", "am": "Amharisch", "ar": "Arabisch", "as": "Assamesisch", "az": "Aserbaidschanisch",
+    "ba": "Baschkirisch", "be": "Belarussisch", "bg": "Bulgarisch", "bn": "Bengalisch", "bo": "Tibetisch",
+    "br": "Bretonisch", "bs": "Bosnisch", "ca": "Katalanisch", "cs": "Tschechisch", "cy": "Walisisch",
+    "da": "Dänisch", "de": "Deutsch", "el": "Griechisch", "en": "Englisch", "es": "Spanisch", "et": "Estnisch",
+    "eu": "Baskisch", "fa": "Persisch", "fi": "Finnisch", "fo": "Färöisch", "fr": "Französisch",
+    "gl": "Galicisch", "gu": "Gujarati", "ha": "Hausa", "haw": "Hawaiisch", "he": "Hebräisch", "hi": "Hindi",
+    "hr": "Kroatisch", "ht": "Haitianisch", "hu": "Ungarisch", "hy": "Armenisch", "id": "Indonesisch",
+    "is": "Isländisch", "it": "Italienisch", "ja": "Japanisch", "jw": "Javanisch", "ka": "Georgisch",
+    "kk": "Kasachisch", "km": "Khmer", "kn": "Kannada", "ko": "Koreanisch", "la": "Latein",
+    "lb": "Luxemburgisch", "ln": "Lingala", "lo": "Laotisch", "lt": "Litauisch", "lv": "Lettisch",
+    "mg": "Malagasy", "mi": "Maori", "mk": "Mazedonisch", "ml": "Malayalam", "mn": "Mongolisch",
+    "mr": "Marathi", "ms": "Malaiisch", "mt": "Maltesisch", "my": "Birmanisch", "ne": "Nepalesisch",
+    "nl": "Niederländisch", "nn": "Norwegisch (Nynorsk)", "no": "Norwegisch", "oc": "Okzitanisch",
+    "pa": "Panjabi", "pl": "Polnisch", "ps": "Paschtu", "pt": "Portugiesisch", "ro": "Rumänisch",
+    "ru": "Russisch", "sa": "Sanskrit", "sd": "Sindhi", "si": "Singhalesisch", "sk": "Slowakisch",
+    "sl": "Slowenisch", "sn": "Shona", "so": "Somali", "sq": "Albanisch", "sr": "Serbisch", "su": "Sundanesisch",
+    "sv": "Schwedisch", "sw": "Suaheli", "ta": "Tamil", "te": "Telugu", "tg": "Tadschikisch", "th": "Thailändisch",
+    "tk": "Turkmenisch", "tl": "Tagalog", "tr": "Türkisch", "tt": "Tatarisch", "uk": "Ukrainisch", "ur": "Urdu",
+    "uz": "Usbekisch", "vi": "Vietnamesisch", "yi": "Jiddisch", "yo": "Yoruba", "yue": "Kantonesisch",
+    "zh": "Chinesisch",
+}
+HAEUFIGE_SPRACHEN = ["de", "en", "fr", "it", "es", "pt", "nl"]
+
+
+def sprach_auswahl():
+    """[(code, anzeige)] für die Auswahl: Automatisch, die häufigen, dann alle übrigen alphabetisch.
+    Ein Eintrag ("-", "") steht für einen Trennstrich."""
+    codes = list(SPRACH_NAMEN)      # = die 100 Sprachen von Whisper (faster_whisper.tokenizer._LANGUAGE_CODES)
+    name = lambda c: SPRACH_NAMEN.get(c, c)  # noqa: E731
+    auswahl = [("", "Automatisch erkennen"), ("-", "")]
+    auswahl += [(c, f"{name(c)} ({c})") for c in HAEUFIGE_SPRACHEN if c in codes]
+    auswahl.append(("-", ""))
+    uebrige = sorted((c for c in codes if c not in HAEUFIGE_SPRACHEN), key=lambda c: name(c).lower())
+    auswahl += [(c, f"{name(c)} ({c})") for c in uebrige]
+    return auswahl
 
 APP_ORDNER = Path(__file__).resolve().parent
 DATEN = Path(os.environ.get("INKWAVE_DATA") or (APP_ORDNER.parent / "daten"))
@@ -255,10 +289,15 @@ def _gpu_bin_ordner():
 
 
 _eingebunden = set()
+_vorgeladen = {}          # Dateiname -> geladene DLL (Verweis halten, damit sie geladen bleibt)
+# in dieser Reihenfolge vorladen: cuBLAS braucht cuBLASLt, cuDNN braucht cuBLAS
+_VORLADEN = ("cublaslt64_12", "cublas64_12", "cudnn64_9")
 
 
 def nvidia_dlls_einbinden():
-    """CUDA-DLLs aus dem GPU-Paket auffindbar machen (kein separates CUDA nötig)."""
+    """CUDA-DLLs aus dem GPU-Paket auffindbar machen (kein separates CUDA nötig).
+    Zusätzlich werden cuBLAS und cuDNN mit vollem Pfad vorgeladen: ctranslate2 lädt sie später nur
+    über den Namen – ist die DLL schon im Prozess, nimmt Windows diese, egal wie die Suchpfade stehen."""
     if os.name != "nt":
         return
     for bin_ordner in _gpu_bin_ordner():
@@ -267,6 +306,14 @@ def nvidia_dlls_einbinden():
         os.add_dll_directory(str(bin_ordner))
         os.environ["PATH"] = str(bin_ordner) + os.pathsep + os.environ.get("PATH", "")
         _eingebunden.add(str(bin_ordner))
+    dlls = {p.name.lower(): p for o in _gpu_bin_ordner() for p in o.glob("*.dll")}
+    for anfang in _VORLADEN:
+        for name, pfad in sorted(dlls.items()):
+            if name.startswith(anfang) and name not in _vorgeladen:
+                try:
+                    _vorgeladen[name] = ctypes.WinDLL(str(pfad))
+                except OSError:
+                    pass          # fällt beim Testlauf auf -> Ausweichen auf CPU mit Meldung
 
 
 def gpu_paket_vorhanden() -> bool:
@@ -822,13 +869,19 @@ def modell_laden(m: Modell, geraet: str, melden=lambda *a, **k: None, threads: i
 
     if not m.bereit:
         raise RuntimeError(f"Modell «{m.name}» ist nicht heruntergeladen.")
-    gpu = geraet != "cpu" and gpu_vorhanden()
     versuche = []
-    if gpu and geraet in ("auto", "cuda"):
-        nvidia_dlls_einbinden()
-        versuche.append(("cuda", "float16"))
-    if geraet in ("auto", "cpu") or not versuche:
-        versuche.append(("cpu", "int8"))
+    if geraet in ("auto", "cuda"):
+        if not gpu_vorhanden():
+            if geraet == "cuda":
+                melden("warnung", text="Keine NVIDIA-Grafikkarte gefunden – rechne auf der CPU.")
+        elif not gpu_paket_vorhanden():
+            melden("warnung", text="GPU-Paket fehlt – rechne auf der CPU (langsamer). Einrichten: "
+                                   "«Modelle verwalten …» → Zusatzpakete → GPU-Paket.")
+        else:
+            nvidia_dlls_einbinden()
+            versuche.append(("cuda", "float16"))
+    # Immer auch die CPU als Ausweg – auch wenn ausdrücklich «Grafikkarte» gewählt ist
+    versuche.append(("cpu", "int8"))
 
     letzter_fehler = None
     for dev, rechentyp in versuche:
@@ -852,8 +905,10 @@ def modell_laden(m: Modell, geraet: str, melden=lambda *a, **k: None, threads: i
             return modell, batch, dev
         except Exception as e:
             letzter_fehler = e
-            melden("warnung", text=f"{'GPU' if dev == 'cuda' else 'CPU'} geht nicht: "
-                                   f"{type(e).__name__}: {str(e)[:200]}")
+            if dev == "cuda":
+                melden("warnung", text=f"GPU nicht nutzbar ({str(e)[:160]}) – rechne auf der CPU.")
+            else:
+                melden("warnung", text=f"CPU geht nicht: {type(e).__name__}: {str(e)[:200]}")
     raise RuntimeError(f"Modell konnte nicht geladen werden: {letzter_fehler}")
 
 

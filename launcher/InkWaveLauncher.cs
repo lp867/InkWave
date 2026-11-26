@@ -1,4 +1,4 @@
-// InkWave.exe: startet InkWave. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
+﻿// InkWave.exe: startet InkWave. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
 // (siehe build.py), gleiches Prinzip wie bei SkyWave:
 // - Portabler Ordner: python\pythonw.exe und app\ liegen neben der exe -> direkt starten.
 // - Einzelne Datei (InkWave-<Version>.exe, Version zweistellig, z. B. 2.0): Python, Pakete und App stecken als ZIP in der exe
@@ -21,8 +21,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("InkWave")]
 [assembly: AssemblyProduct("InkWave")]
 [assembly: AssemblyDescription("Audio und Video lokal in Text umwandeln")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 
 static class InkWaveLauncher
 {
