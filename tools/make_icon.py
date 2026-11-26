@@ -1,4 +1,4 @@
-"""Macht aus tools\\logo.png («Wellen zu Worten») das Transcriber-Symbol: eine .ico mit mehreren
+"""Macht aus tools\\logo.png («Wellen zu Worten») das InkWave-Symbol: eine .ico mit mehreren
 Grössen (für die exe, Verknüpfungen und die Taskleiste) und eine .png fürs Fenster.
 Läuft mit dem Python aus dem Build-Ordner (braucht PySide6).
 

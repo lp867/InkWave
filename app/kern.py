@@ -1,14 +1,15 @@
-"""
-kern.py – die Logik des Transcribers, ohne Oberfläche.
+﻿"""
+kern.py – die Logik von InkWave, ohne Oberfläche.
 
-Abgeleitet aus Transcriber\\mp3_to_text.py (das Skript selbst bleibt unverändert).
+Abgeleitet aus Datachanger\\Transcriber\\mp3_to_text.py (das Skript selbst bleibt unverändert).
 Die Oberfläche (gui.py) ruft nur Funktionen von hier auf; alles Langsame meldet sich über
 einen Rückruf `melden(art, **daten)` und lässt sich über ein threading.Event abbrechen.
 
 Ordner:
-  DATEN            neben der exe (vom Starter über TRANSCRIBER_DATA gesetzt):
+  DATEN            neben der exe (vom Starter über INKWAVE_DATA gesetzt):
                    output\\, modelle\\, einstellungen.json
-  LOKAL            %LOCALAPPDATA%\\Transcriber: gpu\\ (GPU-Paket), umwandlung\\ (transformers+torch)
+  LOKAL            %LOCALAPPDATA%\\InkWave: gpu\\ (GPU-Paket), umwandlung\\ (transformers+torch)
+                   (bis 1.0.1 hiess der Ordner «Transcriber» – alte_daten_uebernehmen() zieht um)
   Hugging-Face-Cache  heruntergeladene Modelle (wie bisher)
 """
 
@@ -47,14 +48,49 @@ SPRACHEN = [("", "Automatisch erkennen"), ("de", "Deutsch"), ("en", "Englisch"),
             ("pl", "Polnisch"), ("tr", "Türkisch"), ("ru", "Russisch"), ("uk", "Ukrainisch")]
 
 APP_ORDNER = Path(__file__).resolve().parent
-DATEN = Path(os.environ.get("TRANSCRIBER_DATA") or (APP_ORDNER.parent / "daten"))
+DATEN = Path(os.environ.get("INKWAVE_DATA") or (APP_ORDNER.parent / "daten"))
 OUTPUT_ORDNER = DATEN / "output"
 MODELL_ORDNER = DATEN / "modelle"
 EINSTELLUNGEN = DATEN / "einstellungen.json"
 
-LOKAL = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Transcriber"
+LOKAL = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "InkWave"
+ALT_LOKAL = LOKAL.with_name("Transcriber")       # Name bis Version 1.0.1
 GPU_ORDNER = LOKAL / "gpu"
 UMWANDLUNG_ORDNER = LOKAL / "umwandlung"
+
+
+def alte_daten_uebernehmen():
+    """Einmalig nach dem Umstieg von «Transcriber» auf InkWave: GPU- und Umwandlungs-Paket aus
+    %LOCALAPPDATA%\\Transcriber übernehmen (verschieben, kein neuer Download) und die alten
+    Programmversionen dort wegräumen – nur, wenn keine davon mehr läuft."""
+    import shutil
+    if not ALT_LOKAL.is_dir():
+        return
+    LOKAL.mkdir(parents=True, exist_ok=True)
+    for name in ("gpu", "umwandlung"):
+        alt, neu = ALT_LOKAL / name, LOKAL / name
+        if alt.is_dir() and not neu.exists():
+            try:
+                alt.rename(neu)              # gleiches Laufwerk -> sofort
+            except OSError:
+                pass
+    programm = ALT_LOKAL / "program"
+    if programm.is_dir():
+        weg = ALT_LOKAL / "program.weg"
+        try:
+            programm.rename(weg)             # klappt nur, wenn keine alte Version mehr läuft
+            shutil.rmtree(weg, ignore_errors=True)
+        except OSError:
+            pass
+    for datei in ("fehler.log", "download.log", "auftrag.log", "sac_test.log"):
+        try:
+            (ALT_LOKAL / datei).unlink()
+        except OSError:
+            pass
+    try:
+        ALT_LOKAL.rmdir()                    # nur wenn leer
+    except OSError:
+        pass
 
 
 class Abgebrochen(Exception):
@@ -311,7 +347,7 @@ def _kopieren_mit_fortschritt(dateien, ziel_von, melden):
 
 
 def gpu_paket_einrichten(quelle=None, melden=lambda **k: None):
-    """Richtet das GPU-Paket in %LOCALAPPDATA%\\Transcriber\\gpu ein: aus einer vorhandenen
+    """Richtet das GPU-Paket in %LOCALAPPDATA%\\InkWave\\gpu ein: aus einer vorhandenen
     Python-Installation kopiert (quelle) oder die Pakete von PyPI geladen (nur bin-Ordner)."""
     import hashlib
     import shutil
@@ -385,7 +421,7 @@ def umwandlung_vorhanden() -> bool:
 
 
 def umwandlung_einrichten(melden=lambda **k: None):
-    """Installiert transformers + torch (CPU) mit pip nach %LOCALAPPDATA%\\Transcriber\\umwandlung."""
+    """Installiert transformers + torch (CPU) mit pip nach %LOCALAPPDATA%\\InkWave\\umwandlung."""
     import shutil
     teil = UMWANDLUNG_ORDNER.with_name(UMWANDLUNG_ORDNER.name + ".part")
     shutil.rmtree(teil, ignore_errors=True)

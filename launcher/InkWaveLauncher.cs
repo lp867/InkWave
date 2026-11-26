@@ -1,12 +1,12 @@
-﻿// Transcriber.exe: startet den Transcriber. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
+// InkWave.exe: startet InkWave. Gebaut mit dem C#-Compiler, der in Windows schon dabei ist
 // (siehe build.py), gleiches Prinzip wie bei SkyWave:
 // - Portabler Ordner: python\pythonw.exe und app\ liegen neben der exe -> direkt starten.
-// - Einzelne Datei (Transcriber-<Version>.exe): Python, Pakete und App stecken als ZIP in der exe
-//   (Ressource "Transcriber.payload"). Der erste Start einer Version entpackt sie einmal nach
-//   %LOCALAPPDATA%\Transcriber\program\<Version> (mit Fortschrittsfenster) und räumt ältere Versionen
+// - Einzelne Datei (InkWave-<Version>.exe, Version zweistellig, z. B. 2.0): Python, Pakete und App stecken als ZIP in der exe
+//   (Ressource "InkWave.payload"). Der erste Start einer Version entpackt sie einmal nach
+//   %LOCALAPPDATA%\InkWave\program\<Version> (mit Fortschrittsfenster) und räumt ältere Versionen
 //   dort weg; spätere Starts gehen direkt los.
 // Gestartet wird immer das signierte pythonw.exe von python.org. Ergebnisse, Modelle und Einstellungen
-// liegen neben der exe (Umgebungsvariable TRANSCRIBER_DATA), nie im Programmordner.
+// liegen neben der exe (Umgebungsvariable INKWAVE_DATA), nie im Programmordner.
 // Hinweis: csc.exe aus .NET Framework 4 kann nur C# 5 (kein $"...", kein ?.).
 using System;
 using System.Diagnostics;
@@ -18,15 +18,15 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Transcriber")]
-[assembly: AssemblyProduct("Transcriber")]
+[assembly: AssemblyTitle("InkWave")]
+[assembly: AssemblyProduct("InkWave")]
 [assembly: AssemblyDescription("Audio und Video lokal in Text umwandeln")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
-static class TranscriberLauncher
+static class InkWaveLauncher
 {
-    const string PayloadName = "Transcriber.payload";
+    const string PayloadName = "InkWave.payload";
     const string ReadyMarker = ".ready";
     static volatile bool unpackDone;
 
@@ -40,7 +40,7 @@ static class TranscriberLauncher
             Stream payload = Assembly.GetExecutingAssembly().GetManifestResourceStream(PayloadName);
             if (payload == null)
             {
-                MessageBox.Show("Python fehlt (python\\pythonw.exe). Bitte den ganzen Ordner aus der ZIP-Datei entpacken.", "Transcriber");
+                MessageBox.Show("Python fehlt (python\\pythonw.exe). Bitte den ganzen Ordner aus der ZIP-Datei entpacken.", "InkWave");
                 return 1;
             }
             using (payload)
@@ -51,7 +51,7 @@ static class TranscriberLauncher
                 }
                 catch (Exception e)
                 {
-                    MessageBox.Show("Transcriber konnte nicht eingerichtet werden: " + e.Message, "Transcriber",
+                    MessageBox.Show("InkWave konnte nicht eingerichtet werden: " + e.Message, "InkWave",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return 1;
                 }
@@ -89,8 +89,8 @@ static class TranscriberLauncher
             WorkingDirectory = home,
             UseShellExecute = false
         };
-        start.EnvironmentVariables["TRANSCRIBER_DATA"] = exeDir;
-        start.EnvironmentVariables["TRANSCRIBER_EXE"] = Application.ExecutablePath;
+        start.EnvironmentVariables["INKWAVE_DATA"] = exeDir;
+        start.EnvironmentVariables["INKWAVE_EXE"] = Application.ExecutablePath;
         start.EnvironmentVariables["PYTHONUTF8"] = "1";
         start.EnvironmentVariables["PYTHONNOUSERSITE"] = "1";
         start.EnvironmentVariables.Remove("PYTHONPATH");
@@ -101,7 +101,7 @@ static class TranscriberLauncher
         }
         catch (Exception e)
         {
-            MessageBox.Show("Transcriber konnte nicht starten: " + e.Message, "Transcriber");
+            MessageBox.Show("InkWave konnte nicht starten: " + e.Message, "InkWave");
             return 1;
         }
         return 0;
@@ -111,11 +111,11 @@ static class TranscriberLauncher
     static string Unpacked(Stream payload)
     {
         string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Transcriber", "program");
+            "InkWave", "program");
         // Version plus Grösse: eine neu gebaute exe derselben Version bekommt ihren eigenen Ordner.
-        string name = Assembly.GetExecutingAssembly().GetName().Version.ToString(3) + "-" + payload.Length.ToString("x");
+        string name = Assembly.GetExecutingAssembly().GetName().Version.ToString(2) + "-" + payload.Length.ToString("x");
         string target = Path.Combine(root, name);
-        using (var mutex = new Mutex(false, "Local\\TranscriberUnpack"))
+        using (var mutex = new Mutex(false, "Local\\InkWaveUnpack"))
         {
             bool ready = File.Exists(Path.Combine(target, ReadyMarker));
             bool owned;
@@ -157,7 +157,7 @@ static class TranscriberLauncher
         Application.EnableVisualStyles();
         var form = new Form
         {
-            Text = "Transcriber",
+            Text = "InkWave",
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
             MinimizeBox = false,
@@ -174,7 +174,7 @@ static class TranscriberLauncher
         }
         var label = new Label
         {
-            Text = "Transcriber wird eingerichtet (nur beim ersten Start einer Version) …",
+            Text = "InkWave wird eingerichtet (nur beim ersten Start einer Version) …",
             AutoSize = false,
             Location = new Point(16, 16),
             Size = new Size(388, 22)

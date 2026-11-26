@@ -1,4 +1,4 @@
-# Pakete, die in die Transcriber.exe kommen (exakte Versionen = bei Elias getestet).
+# Pakete, die in die InkWave.exe kommen (exakte Versionen = bei Elias getestet).
 # GPU-Dateien (nvidia-*) und Umwandlung (transformers, torch) sind NICHT dabei,
 # die lädt die App bei Bedarf nach.
 faster-whisper==1.2.1

@@ -1,14 +1,15 @@
-# Transcriber
+# InkWave
 
-Wandelt Audio und Video lokal und offline in Text um – mit Whisper (faster-whisper).
+Verwandelt Audio und Video lokal und offline in Text – mit Whisper (faster-whisper).
+Hell oder dunkel wie Windows, mit dem Logo «Wellen zu Worten». Bis Version 1.0.1 hiess die App «Transcriber».
 Eigene Windows-App statt Terminal. Läuft mit NVIDIA-Grafikkarte (schnell) und ohne (CPU, int8).
 
 ## Installieren
 
-- `Transcriber-<Version>.exe` in einen eigenen Ordner legen (z. B. `Dokumente\Transcriber`) und starten.
+- `InkWave-<Version>.exe` in einen eigenen Ordner legen (z. B. `Desktop\InkWave`) und starten.
   Beim ersten Start einer Version richtet sie sich in etwa 30 Sekunden unter
-  `%LOCALAPPDATA%\Transcriber\program` ein (ältere Versionen dort räumt sie weg), danach startet sie sofort.
-- Alternativ `Transcriber-<Version>-Ordner.zip` entpacken und `Transcriber.exe` im Ordner starten.
+  `%LOCALAPPDATA%\InkWave\program` ein (ältere Versionen dort räumt sie weg), danach startet sie sofort.
+- Alternativ `InkWave-<Version>-Ordner.zip` entpacken und `InkWave.exe` im Ordner starten.
 - Fragt Windows «Der Computer wurde durch Windows geschützt»: «Weitere Informationen» → «Trotzdem ausführen».
 
 Neben der exe legt die App an:
@@ -20,12 +21,18 @@ Neben der exe legt die App an:
 | `einstellungen.json` | zuletzt gewähltes Modell und Optionen |
 
 Heruntergeladene Standardmodelle liegen im Hugging-Face-Cache (`%USERPROFILE%\.cache\huggingface\hub`).
-In `%LOCALAPPDATA%\Transcriber` liegen ausserdem das Programm selbst und – falls eingerichtet – das
+In `%LOCALAPPDATA%\InkWave` liegen ausserdem das Programm selbst und – falls eingerichtet – das
 GPU-Paket (`gpu\`) und das Umwandlungs-Paket (`umwandlung\`).
+
+## Umstieg von Transcriber 1.x
+
+`InkWave.exe` an die Stelle von `Transcriber.exe` legen (Ordner `modelle`, `output` und `einstellungen.json`
+bleiben gleich). Beim ersten Start übernimmt InkWave GPU- und Umwandlungs-Paket aus
+`%LOCALAPPDATA%\Transcriber` (verschieben, kein neuer Download) und räumt die alten Programmversionen weg.
 
 ## Auf einem anderen PC (z. B. Laptop ohne Grafikkarte)
 
-1. `Transcriber.exe` in einen eigenen Ordner kopieren (USB-Stick oder Download aus den Releases).
+1. `InkWave.exe` in einen eigenen Ordner kopieren (USB-Stick oder Download aus den Releases).
 2. Eigene Modelle mitnehmen: den Ordner `modelle\Flix-AI__flix-swissgerman-full` (3 GB) daneben in
    `modelle\` legen. Umwandeln ist dort nicht mehr nötig.
 3. Starten. Beim ersten Start fragt die App, welche Modelle sie laden soll; ohne Grafikkarte ist
@@ -50,7 +57,7 @@ halb so schnell. «Schonend rechnen» senkt die Priorität, damit der Laptop bed
 
 ## Warum ein C#-Starter und kein PyInstaller?
 
-Smart App Control blockiert unbekannte, unsignierte Programme. Die `Transcriber.exe` ist nur ein kleiner
+Smart App Control blockiert unbekannte, unsignierte Programme. Die `InkWave.exe` ist nur ein kleiner
 Starter (übersetzt mit dem `csc.exe`, das in Windows dabei ist). Sie enthält Python, die Pakete und die App
 als ZIP, entpackt sie einmal und startet dann das **signierte** `pythonw.exe` von python.org.
 Alle übrigen Dateien sind unverändert aus python.org bzw. PyPI. Gleiches Prinzip wie SkyWave.
@@ -63,15 +70,16 @@ Auf einem Windows-PC mit Python 3.11:
 python build.py
 ```
 
-Ergebnis in `dist\`: `Transcriber-<Version>.exe` und `Transcriber-<Version>-Ordner.zip`.
-Die Version steht in `launcher\TranscriberLauncher.cs` (`AssemblyVersion`).
+Ergebnis in `dist\`: `InkWave-<Version>.exe` und `InkWave-<Version>-Ordner.zip`.
+Die Version steht in `launcher\InkWaveLauncher.cs` (`AssemblyVersion`), angezeigt wird sie zweistellig (2.0, 2.1 …).
 
 ## Aufbau
 
-- `launcher\TranscriberLauncher.cs` – Starter (entpacken, pythonw starten)
+- `launcher\InkWaveLauncher.cs` – Starter (entpacken, pythonw starten)
 - `app\main.pyw` – Einstieg der App
 - `app\kern.py` – Logik ohne Oberfläche (Modelle, GPU/CPU, Transkription, Umwandlung, Zusatzpakete)
 - `app\gui.py` – Hauptfenster
+- `app\theme.py` – Aussehen: hell/dunkel wie Windows, Lila-Akzente aus dem Logo
 - `app\modelle_dialog.py` – Fenster «Modelle» (Download, Umwandeln, Zusatzpakete)
 - `tools\logo.png` – das Logo «Wellen zu Worten»; `tools\make_icon.py` macht daraus die .ico
 - `requirements.txt` – Pakete in der exe (exakte Versionen)

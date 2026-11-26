@@ -1,9 +1,9 @@
-"""Einstieg des Transcribers. Wird vom Starter (Transcriber.exe) mit pythonw.exe gestartet:
+"""Einstieg von InkWave. Wird vom Starter (InkWave.exe) mit pythonw.exe gestartet:
 
     pythonw.exe app\\main.pyw [Dateien oder Ordner ...]
 
 Ohne Konsole gibt es kein stdout/stderr – alles Unerwartete landet in
-%LOCALAPPDATA%\\Transcriber\\fehler.log und wird als Meldung angezeigt.
+%LOCALAPPDATA%\\InkWave\\fehler.log und wird als Meldung angezeigt.
 """
 
 import os
@@ -15,7 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LOG = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Transcriber" / "fehler.log"
+APP_NAME = "InkWave"
+LOG = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "InkWave" / "fehler.log"
 
 
 def _log_datei():
@@ -42,14 +43,14 @@ def fehler_melden(text: str):
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
         if QApplication.instance() is not None:
-            QMessageBox.critical(None, "Transcriber – Fehler",
+            QMessageBox.critical(None, f"{APP_NAME} – Fehler",
                                  f"{text.strip().splitlines()[-1]}\n\nDetails stehen in:\n{LOG}")
             return
     except Exception:
         pass
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, text[-1500:], "Transcriber – Fehler", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, text[-1500:], f"{APP_NAME} – Fehler", 0x10)
     except Exception:
         pass
 
@@ -68,26 +69,31 @@ def main() -> int:
     try:
         # eigenes Symbol in der Taskleiste statt dem von Python
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Elias.Transcriber")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Elias.InkWave")
     except Exception:
         pass
 
+    import kern
+    kern.alte_daten_uebernehmen()      # einmalig: Daten aus «Transcriber» (bis 1.0.1) übernehmen
+
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
     app = QApplication(sys.argv)
-    app.setApplicationName("Transcriber")
-    ico = Path(__file__).resolve().parent / "transcriber.ico"
+    app.setApplicationName(APP_NAME)
+    ico = Path(__file__).resolve().parent / "inkwave.ico"
     if ico.exists():
-        from PySide6.QtGui import QIcon
         app.setWindowIcon(QIcon(str(ico)))      # gilt für alle Fenster und Dialoge
 
-    import kern
+    import theme
+    thema = theme.Thema(app)                   # hell/dunkel wie Windows, Lila aus dem Logo
+
     problem = kern.av_version_pruefen()
     if problem:
-        QMessageBox.critical(None, "Transcriber", problem)
+        QMessageBox.critical(None, APP_NAME, problem)
         return 1
 
     import gui
-    fenster = gui.Hauptfenster(sys.argv[1:])
+    fenster = gui.Hauptfenster(sys.argv[1:], thema)
     fenster.show()
     return app.exec()
 

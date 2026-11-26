@@ -1,4 +1,4 @@
-﻿"""Baut Transcriber-<Version>.exe (eine Datei) und Transcriber-<Version>-Ordner.zip (portabel).
+"""Baut InkWave-<Version>.exe (eine Datei) und InkWave-<Version>-Ordner.zip (portabel).
 
 Läuft mit dem normalen Python 3.11 auf dem Entwicklungs-PC:
     python build.py
@@ -8,8 +8,8 @@ Ablauf:
  2. Pakete aus requirements.txt dort hinein installieren (pip --target)
  3. App-Code nach build\stage\app kopieren, alles vorkompilieren (.pyc)
  4. Symbol zeichnen, alles als ZIP packen
- 5. Starter (launcher\TranscriberLauncher.cs) mit dem csc.exe von Windows übersetzen,
-    das ZIP kommt als Ressource hinein -> dist\Transcriber-<Version>.exe
+ 5. Starter (launcher\InkWaveLauncher.cs) mit dem csc.exe von Windows übersetzen,
+    das ZIP kommt als Ressource hinein -> dist\InkWave-<Version>.exe
 """
 
 import compileall
@@ -31,11 +31,11 @@ BUILD = ROOT / "build"
 CACHE = BUILD / "cache"
 STAGE = BUILD / "stage"
 DIST = ROOT / "dist"
-LAUNCHER = ROOT / "launcher" / "TranscriberLauncher.cs"
+LAUNCHER = ROOT / "launcher" / "InkWaveLauncher.cs"
 
 
 def version() -> str:
-    m = re.search(r'AssemblyVersion\("(\d+\.\d+\.\d+)', LAUNCHER.read_text(encoding="utf-8"))
+    m = re.search(r'AssemblyVersion\("(\d+\.\d+)', LAUNCHER.read_text(encoding="utf-8"))
     return m.group(1)
 
 
@@ -92,11 +92,11 @@ def app_kopieren():
 
 def symbol() -> Path:
     schritt("Symbol zeichnen")
-    ico = BUILD / "transcriber.ico"
+    ico = BUILD / "inkwave.ico"
     subprocess.run([str(STAGE / "python" / "python.exe"), str(ROOT / "tools" / "make_icon.py"), str(ico)],
                    check=True)
-    shutil.copy(ico, STAGE / "app" / "transcriber.ico")
-    shutil.copy(ico.with_suffix(".png"), STAGE / "app" / "transcriber.png")
+    shutil.copy(ico, STAGE / "app" / "inkwave.ico")
+    shutil.copy(ico.with_suffix(".png"), STAGE / "app" / "inkwave.png")
     return ico
 
 
@@ -116,14 +116,14 @@ def starter(ico: Path, payload: Path | None, ausgabe: Path):
               "/r:System.IO.Compression.dll", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
               f"/out:{ausgabe}"]
     if payload:
-        befehl.append(f"/resource:{payload},Transcriber.payload")
+        befehl.append(f"/resource:{payload},InkWave.payload")
     befehl.append(str(LAUNCHER))
     subprocess.run(befehl, check=True)
 
 
 def main():
     v = version()
-    print(f"Transcriber {v}")
+    print(f"InkWave {v}")
     if STAGE.exists():
         shutil.rmtree(STAGE)
     DIST.mkdir(exist_ok=True)
@@ -134,19 +134,19 @@ def main():
     payload = packen()
 
     schritt("Starter übersetzen")
-    exe = DIST / f"Transcriber-{v}.exe"
+    exe = DIST / f"InkWave-{v}.exe"
     starter(ico, payload, exe)
     print(f"{exe.name}: {exe.stat().st_size / 1e6:.0f} MB")
 
     # Portabler Ordner als ZIP: Starter ohne Ressource + stage-Inhalt
-    ordner_exe = BUILD / "Transcriber.exe"
+    ordner_exe = BUILD / "InkWave.exe"
     starter(ico, None, ordner_exe)
-    zip_pfad = DIST / f"Transcriber-{v}-Ordner.zip"
+    zip_pfad = DIST / f"InkWave-{v}-Ordner.zip"
     with zipfile.ZipFile(zip_pfad, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        z.write(ordner_exe, "Transcriber/Transcriber.exe")
+        z.write(ordner_exe, "InkWave/InkWave.exe")
         for datei in sorted(STAGE.rglob("*")):
             if datei.is_file():
-                z.write(datei, "Transcriber/" + datei.relative_to(STAGE).as_posix())
+                z.write(datei, "InkWave/" + datei.relative_to(STAGE).as_posix())
     print(f"{zip_pfad.name}: {zip_pfad.stat().st_size / 1e6:.0f} MB")
     print("\nFertig.")
 

@@ -68,17 +68,15 @@ class ModellDialog(QDialog):
         self.timer.setInterval(400)
         self.timer.timeout.connect(self._pruefen)
 
-        self.setWindowTitle("Modelle – Transcriber")
-        self.resize(940, 680)
+        self.setWindowTitle("Modelle – InkWave")
+        self.resize(980, 740)
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
 
-        titel = QLabel("Willkommen! Welche Modelle sollen heruntergeladen werden?" if erster_start
+        lay.setContentsMargins(22, 18, 22, 18)
+        titel = QLabel("Willkommen bei InkWave! Welche Modelle sollen heruntergeladen werden?" if erster_start
                        else "Modelle")
-        f = titel.font()
-        f.setPointSizeF(f.pointSizeF() * 1.35)
-        f.setBold(True)
-        titel.setFont(f)
+        titel.setObjectName("gross")
         lay.addWidget(titel)
         geraet = "mit Grafikkarte" if gpu else "ohne Grafikkarte (CPU)"
         hinweis = QLabel(
@@ -87,6 +85,7 @@ class ModellDialog(QDialog):
             "Die Modelle werden nur einmal geladen und liegen danach auf der Festplatte "
             "(Hugging-Face-Cache bzw. Ordner «modelle»), nicht in der App.")
         hinweis.setWordWrap(True)
+        hinweis.setObjectName("gedaempft")
         lay.addWidget(hinweis)
 
         self.baum = QTreeWidget()
@@ -94,7 +93,8 @@ class ModellDialog(QDialog):
         self.baum.setRootIsDecorated(False)
         self.baum.setUniformRowHeights(True)
         kopf = self.baum.header()
-        kopf.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        kopf.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.baum.setColumnWidth(0, 300)
         kopf.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         kopf.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         kopf.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
@@ -165,9 +165,7 @@ class ModellDialog(QDialog):
 
         knoepfe = QHBoxLayout()
         self.btn_laden = QPushButton("Herunterladen")
-        b = self.btn_laden.font()
-        b.setBold(True)
-        self.btn_laden.setFont(b)
+        self.btn_laden.setObjectName("primaer")
         self.btn_laden.clicked.connect(self._angehakte_starten)
         self.btn_abbrechen = QPushButton("Abbrechen")
         self.btn_abbrechen.clicked.connect(self._abbrechen)
