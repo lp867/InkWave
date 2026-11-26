@@ -75,6 +75,10 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QMessageBox
     app = QApplication(sys.argv)
     app.setApplicationName("Transcriber")
+    ico = Path(__file__).resolve().parent / "transcriber.ico"
+    if ico.exists():
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(str(ico)))      # gilt für alle Fenster und Dialoge
 
     import kern
     problem = kern.av_version_pruefen()

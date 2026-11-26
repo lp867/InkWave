@@ -166,6 +166,13 @@ def physische_kerne() -> int:
     return max(1, (os.cpu_count() or 2) // 2)
 
 
+def cpu_threads(wunsch: int = 0) -> int:
+    """Rechen-Threads auf der CPU: echte Kerne, höchstens 8.
+    Gemessen (Core Ultra 7 255HX): 8 Threads sind schneller als 20 (viele Effizienzkerne), und der
+    Batch-Modus stürzt ab etwa 16 Threads mit Stack-Überlauf ab – deshalb fest begrenzt."""
+    return max(1, min(wunsch or physische_kerne(), 8))
+
+
 class WachHalten:
     """Verhindert Standby, solange transkribiert wird (Bildschirm darf aus)."""
 
@@ -731,7 +738,7 @@ def hf_modell_merken(repo: str, gesamt: int = 0):
 
 # ---------------------------------------------------------------- Modell laden
 
-def modell_laden(m: Modell, geraet: str, melden=lambda *a, **k: None, cpu_threads: int = 0):
+def modell_laden(m: Modell, geraet: str, melden=lambda *a, **k: None, threads: int = 0):
     """Lädt ein bereites Modell. geraet: "auto" | "cuda" | "cpu".
     Gibt (WhisperModel, BatchedInferencePipeline oder None, "cuda"/"cpu") zurück."""
     from faster_whisper import WhisperModel
@@ -752,16 +759,17 @@ def modell_laden(m: Modell, geraet: str, melden=lambda *a, **k: None, cpu_thread
             melden("status", text=f"Lade Modell «{m.name}» auf {'GPU' if dev == 'cuda' else 'CPU'} …")
             t0 = time.time()
             modell = WhisperModel(m.pfad, device=dev, compute_type=rechentyp,
-                                  cpu_threads=cpu_threads if dev == "cpu" else 0)
+                                  cpu_threads=cpu_threads(threads) if dev == "cpu" else 0)
             if dev == "cuda":
                 # Kurzer Testlauf mit 1 s Stille: fehlende CUDA/cuDNN-DLLs fallen jetzt auf, nicht mitten drin
                 import numpy as np
                 segs, _ = modell.transcribe(np.zeros(16000, dtype=np.float32), language="en")
                 list(segs)
-            batch = None
-            if dev == "cuda":
-                from faster_whisper import BatchedInferencePipeline
-                batch = BatchedInferencePipeline(model=modell)
+            # Batch-Modus: mehrere Abschnitte gleichzeitig. GPU 16, CPU 8 (gemessen: auf der CPU
+            # etwa 1.4–2x schneller als normal, gleicher Text)
+            from faster_whisper import BatchedInferencePipeline
+            batch = BatchedInferencePipeline(model=modell)
+            batch.groesse = 16 if dev == "cuda" else 8
             melden("status", text=f"Modell bereit auf {'GPU' if dev == 'cuda' else 'CPU'} "
                                   f"(geladen in {time.time() - t0:.1f} s)")
             return modell, batch, dev
@@ -813,8 +821,9 @@ def transkribieren(modell, batch, datei: Path, sprache=None, srt=False, zeitstem
     tonspur_pruefen(datei)
     try:
         if batch is not None:
-            # GPU: mehrere Abschnitte gleichzeitig -> deutlich schneller (VAD ist hier immer an)
-            segmente, info = batch.transcribe(str(datei), language=sprache, batch_size=16, beam_size=5)
+            # mehrere Abschnitte gleichzeitig -> deutlich schneller (VAD ist hier immer an)
+            segmente, info = batch.transcribe(str(datei), language=sprache,
+                                              batch_size=getattr(batch, "groesse", 8), beam_size=5)
         else:
             segmente, info = modell.transcribe(str(datei), language=sprache, vad_filter=True, beam_size=5)
     except (IndexError, ValueError) as e:
@@ -910,7 +919,7 @@ def _cli():
         m = modell_finden(name)
         if m is None:
             sys.exit(f"Modell {name} unbekannt")
-        modell, batch, dev = modell_laden(m, geraet, melden, cpu_threads=physische_kerne())
+        modell, batch, dev = modell_laden(m, geraet, melden)
         with WachHalten():
             e = transkribieren(modell, batch, datei, melden=melden)
         print(f"  -> {e.txt} | {e.sprache} {e.sprache_wahrscheinlichkeit:.0%} | {e.dauer:.1f} s Audio "

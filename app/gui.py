@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPainter, QColor
+from PySide6.QtGui import QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTabWidget,
@@ -87,7 +87,7 @@ class Arbeiter(QObject):
                 self._modell = self._batch = None      # altes Modell zuerst freigeben (Speicher)
                 gc.collect()
                 self._modell, self._batch, self._dev = kern.modell_laden(
-                    m, auftrag["geraet"], self._melden, cpu_threads=auftrag["threads"])
+                    m, auftrag["geraet"], self._melden, threads=auftrag["threads"])
                 self._schluessel = schluessel
             self.geraet_bereit.emit(self._dev)
 
@@ -247,6 +247,16 @@ class Hauptfenster(QMainWindow):
         titel.setFont(f)
         untertitel = QLabel("Audio und Video lokal in Text umwandeln – offline, mit Whisper")
         untertitel.setStyleSheet("color: palette(placeholder-text);")
+        logo_pfad = kern.APP_ORDNER / "transcriber.png"
+        if logo_pfad.exists():
+            logo = QLabel()
+            dpr = self.devicePixelRatioF()
+            bild = QPixmap(str(logo_pfad)).scaled(int(52 * dpr), int(52 * dpr), Qt.AspectRatioMode.KeepAspectRatio,
+                                                 Qt.TransformationMode.SmoothTransformation)
+            bild.setDevicePixelRatio(dpr)
+            logo.setPixmap(bild)
+            kopf.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
+            kopf.addSpacing(8)
         t = QVBoxLayout()
         t.setSpacing(0)
         t.addWidget(titel)
@@ -602,7 +612,7 @@ class Hauptfenster(QMainWindow):
             "dateien": dateien, "modell": modell, "geraet": self.cb_geraet.currentData(), "sprache": sprache,
             "srt": self.chk_srt.isChecked(), "zeitstempel": self.chk_zeit.isChecked(),
             "schonend": self.chk_schonend.isChecked(),
-            "threads": int(kern.einstellungen_lesen().get("cpu_threads") or kern.physische_kerne()),
+            "threads": kern.cpu_threads(int(kern.einstellungen_lesen().get("cpu_threads") or 0)),
         })
 
     def abbrechen(self):
