@@ -554,6 +554,47 @@ def umgewandelt_ordner(repo: str) -> Path:
     return MODELL_ORDNER / repo.replace("/", "__")
 
 
+def cache_ordner(repo: str) -> Path:
+    return hf_cache() / ("models--" + repo.replace("/", "--"))
+
+
+def _ordner_bytes(p: Path) -> int:
+    try:
+        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
+def ueberfluessige_originale() -> list:
+    """[(repo, bytes)] – Originale im HF-Cache, deren umgewandelte Fassung schon in «modelle» liegt."""
+    gefunden = []
+    if not MODELL_ORDNER.is_dir():
+        return gefunden
+    for ordner in MODELL_ORDNER.iterdir():
+        if not (ordner.is_dir() and ist_ct2(ordner)):
+            continue
+        try:
+            repo = json.loads((ordner / "quelle.json").read_text(encoding="utf-8")).get("repo", "")
+        except (OSError, ValueError):
+            continue
+        if repo and cache_ordner(repo).is_dir():
+            gefunden.append((repo, _ordner_bytes(cache_ordner(repo))))
+    return gefunden
+
+
+def original_loeschen(repo: str) -> int:
+    """Löscht das Original eines umgewandelten Modells aus dem HF-Cache. Nur wenn die umgewandelte
+    Fassung vollständig da ist. Gibt die freigegebenen Bytes zurück."""
+    import shutil
+    if not ist_ct2(umgewandelt_ordner(repo)):
+        raise RuntimeError(f"Keine umgewandelte Fassung von «{repo}» – Original wird nicht gelöscht.")
+    ordner = cache_ordner(repo)
+    frei = _ordner_bytes(ordner)
+    shutil.rmtree(ordner)
+    shutil.rmtree(hf_cache() / ".locks" / ordner.name, ignore_errors=True)
+    return frei
+
+
 def modell_liste() -> list:
     """Alle Modelle: eingebaute, eigene (Ordner «modelle») und weitere aus dem HF-Cache."""
     liste, gesehen = [], set()

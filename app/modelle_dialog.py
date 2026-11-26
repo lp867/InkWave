@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont
-from PySide6.QtWidgets import (QDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QMessageBox, QProgressBar, QPushButton, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout)
 
@@ -138,6 +138,20 @@ class ModellDialog(QDialog):
         z.addWidget(self.btn_umw, 1, 3)
         lay.addWidget(zusatz)
 
+        # Originale nach dem Umwandeln
+        orig = QHBoxLayout()
+        self.chk_original = QCheckBox("Original nach dem Umwandeln aus dem Hugging-Face-Cache löschen "
+                                      "(spart Platz – lässt sich jederzeit neu laden)")
+        self.chk_original.setChecked(bool(kern.einstellungen_lesen().get("original_loeschen", True)))
+        self.chk_original.toggled.connect(lambda an: kern.einstellungen_speichern(original_loeschen=an))
+        orig.addWidget(self.chk_original, 1)
+        self.btn_originale = QPushButton()
+        self.btn_originale.setToolTip("Löscht Originale im Hugging-Face-Cache, deren umgewandelte Fassung "
+                                      "schon im Ordner «modelle» liegt.")
+        self.btn_originale.clicked.connect(self._originale_loeschen)
+        orig.addWidget(self.btn_originale)
+        lay.addLayout(orig)
+
         # Fortschritt
         self.lbl_status = QLabel("")
         self.lbl_status.setWordWrap(True)
@@ -225,6 +239,31 @@ class ModellDialog(QDialog):
             self.lbl_gpu.setText("fehlt – ohne Paket rechnet die App auf der CPU (langsamer)")
         self.lbl_umw.setText("✓ eingerichtet" if kern.umwandlung_vorhanden()
                              else "nur nötig für Modelle im Transformers-Format (z. B. Flix)")
+        self.originale = kern.ueberfluessige_originale()
+        summe = sum(b for _, b in self.originale)
+        self.btn_originale.setText(f"Überflüssige Originale löschen ({kern.groesse_text(summe)})")
+        self.btn_originale.setVisible(bool(self.originale))
+
+    def _originale_loeschen(self):
+        if not self.originale or self.proc is not None:
+            return
+        liste = "\n".join(f"  • {repo} ({kern.groesse_text(b)})" for repo, b in self.originale)
+        antwort = QMessageBox.question(
+            self, "Originale löschen",
+            f"Diese Originale im Hugging-Face-Cache werden nicht mehr gebraucht, weil die umgewandelte "
+            f"Fassung im Ordner «modelle» liegt:\n\n{liste}\n\nEndgültig löschen? (Lässt sich jederzeit "
+            "neu herunterladen.)")
+        if antwort != QMessageBox.StandardButton.Yes:
+            return
+        frei, fehler = 0, []
+        for repo, _ in self.originale:
+            try:
+                frei += kern.original_loeschen(repo)
+            except Exception as e:
+                fehler.append(f"{repo}: {e}")
+        self.lbl_status.setText(f"Originale gelöscht – {kern.groesse_text(frei)} frei."
+                                + (f"  Nicht gelöscht: {'; '.join(fehler)}" if fehler else ""))
+        self.fuellen()
 
     def _eintraege(self):
         for i in range(self.baum.topLevelItemCount()):
@@ -263,6 +302,7 @@ class ModellDialog(QDialog):
         self.btn_gpu_laden.setEnabled(not laeuft)
         self.btn_umw.setVisible(not kern.umwandlung_vorhanden())
         self.btn_umw.setEnabled(not laeuft)
+        self.btn_originale.setEnabled(not laeuft)
 
     # ------------------------------------------------------------ Hinzufügen
 
@@ -403,6 +443,14 @@ class ModellDialog(QDialog):
                     "gpu": "ist eingerichtet ✓ – die Grafikkarte wird ab jetzt genutzt",
                     "umwandlung": "ist eingerichtet ✓"}[a["art"]]
             self.lbl_status.setText(f"«{a['name']}» {text}")
+            if (a["art"] == "umwandeln" and a.get("repo") and self.chk_original.isChecked()
+                    and kern.cache_ordner(a["repo"]).is_dir()):
+                try:
+                    frei = kern.original_loeschen(a["repo"])
+                    self.lbl_status.setText(f"«{a['name']}» {text}  ·  Original im Cache gelöscht "
+                                            f"({kern.groesse_text(frei)} frei)")
+                except Exception as e:
+                    self.lbl_status.setText(f"«{a['name']}» {text}  ·  Original nicht gelöscht: {e}")
             if a["art"] == "download":
                 m = kern.modell_finden(a["name"])
                 if m is not None and m.zustand == "umwandeln":

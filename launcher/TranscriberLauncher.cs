@@ -21,8 +21,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Transcriber")]
 [assembly: AssemblyProduct("Transcriber")]
 [assembly: AssemblyDescription("Audio und Video lokal in Text umwandeln")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 static class TranscriberLauncher
 {
