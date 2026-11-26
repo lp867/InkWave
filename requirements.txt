@@ -1,0 +1,13 @@
+# Pakete, die in die Transcriber.exe kommen (exakte Versionen = bei Elias getestet).
+# GPU-Dateien (nvidia-*) und Umwandlung (transformers, torch) sind NICHT dabei,
+# die lädt die App bei Bedarf nach.
+faster-whisper==1.2.1
+ctranslate2==4.8.3
+av==18.1.1              # PyAV ab 19 geht nicht mit faster-whisper; 18.1.0 wurde zurückgezogen
+numpy==2.4.6
+onnxruntime==1.31.0
+tokenizers==0.23.3
+huggingface_hub==2.4.0
+hf-xet==1.7.0
+tqdm==4.70.0
+PySide6-Essentials==6.11.3

@@ -1,0 +1,9 @@
+# Build-Ergebnisse
+build/
+dist/
+
+# Daten beim Entwickeln (output, modelle, einstellungen.json)
+daten/
+
+__pycache__/
+*.pyc
