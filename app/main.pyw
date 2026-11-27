@@ -24,6 +24,17 @@ def _log_datei():
     return open(LOG, "a", encoding="utf-8", buffering=1)
 
 
+def _log_kuerzen(grenze: int = 1_000_000):
+    """Das Protokoll wächst sonst über die Jahre unbegrenzt: ab 1 MB nur das letzte Viertel behalten."""
+    try:
+        if LOG.stat().st_size > grenze:
+            LOG.write_bytes(LOG.read_bytes()[-grenze // 4:])
+    except OSError:
+        pass
+
+
+_log_kuerzen()
+
 # pythonw: stdout/stderr fehlen -> Bibliotheken, die etwas ausgeben (tqdm, Warnungen), würden abstürzen
 if sys.stdout is None or sys.stderr is None:
     try:
@@ -34,6 +45,29 @@ if sys.stdout is None or sys.stderr is None:
     sys.stderr = sys.stderr or _ausgabe
 
 
+_melder = None            # ab dem Start der Oberfläche: bringt Meldungen aus anderen Threads ins Fenster
+_meldung_offen = False
+
+
+def _fenster_meldung(text: str):
+    """Fehlerfenster – nur im Fenster-Thread aufrufen. Höchstens eines gleichzeitig: wiederholt sich ein
+    Fehler (z. B. bei jedem Textabschnitt), stapeln sich sonst Dutzende Fenster; alles steht im Protokoll."""
+    global _meldung_offen
+    if _meldung_offen:
+        return
+    _meldung_offen = True
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QMessageBox
+        zeilen = text.strip().splitlines() or ["Unbekannter Fehler"]
+        box = QMessageBox(QMessageBox.Icon.Critical, f"{APP_NAME} – Fehler",
+                          f"{zeilen[-1][:600]}\n\nDetails stehen in:\n{LOG}", QMessageBox.StandardButton.Ok)
+        box.setTextFormat(Qt.TextFormat.PlainText)      # Fehlertexte nie als HTML deuten
+        box.exec()
+    finally:
+        _meldung_offen = False
+
+
 def fehler_melden(text: str):
     try:
         with _log_datei() as f:
@@ -41,11 +75,15 @@ def fehler_melden(text: str):
     except OSError:
         pass
     try:
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
         if QApplication.instance() is not None:
-            QMessageBox.critical(None, f"{APP_NAME} – Fehler",
-                                 f"{text.strip().splitlines()[-1]}\n\nDetails stehen in:\n{LOG}")
-            return
+            if threading.current_thread() is threading.main_thread():
+                _fenster_meldung(text)
+                return
+            if _melder is not None:
+                # Fenster dürfen nur im Fenster-Thread entstehen (sonst Absturz) -> per Signal hinüberreichen
+                _melder.zeigen.emit(text)
+                return
     except Exception:
         pass
     try:
@@ -76,10 +114,28 @@ def main() -> int:
     import kern
     kern.alte_daten_uebernehmen()      # einmalig: Daten aus «Transcriber» (bis 1.0.1) übernehmen
 
+    from PySide6.QtCore import QObject, Signal, Slot
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
-    app = QApplication(sys.argv)
+    # Nur den Programmnamen an Qt geben: die übrigen Argumente sind Dateien, und Qt würde solche,
+    # die wie Qt-Optionen aussehen (-style, -platformpluginpath …), selbst auswerten.
+    app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
+
+    class _Melder(QObject):
+        """Lebt im Fenster-Thread; ein Signal aus einem anderen Thread kommt hier eingereiht an."""
+        zeigen = Signal(str)
+
+        def __init__(self, eltern):
+            super().__init__(eltern)
+            self.zeigen.connect(self._zeigen)
+
+        @Slot(str)
+        def _zeigen(self, text):
+            _fenster_meldung(text)
+
+    global _melder
+    _melder = _Melder(app)
     ico = Path(__file__).resolve().parent / "inkwave.ico"
     if ico.exists():
         app.setWindowIcon(QIcon(str(ico)))      # gilt für alle Fenster und Dialoge

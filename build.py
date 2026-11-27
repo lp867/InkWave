@@ -13,6 +13,7 @@ Ablauf:
 """
 
 import compileall
+import hashlib
 import py_compile
 import re
 import shutil
@@ -24,7 +25,11 @@ from pathlib import Path
 
 PY_VERSION = "3.11.9"
 PY_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/python-{PY_VERSION}-embed-amd64.zip"
-CSC = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
+# SHA-256 des Archivs (dieselbe Datei wie auf python.org, dort MD5 6d9aa08531d48fcc261ba667e2df17c4).
+# Die Signatur deckt nur die .exe/.dll ab – die Prüfsumme auch die Standardbibliothek (python311.zip).
+# Bei einer neuen PY_VERSION anpassen.
+PY_SHA256 = "009d6bf7e3b2ddca3d784fa09f90fe54336d5b60f0e0f305c37f400bf83cfd3b"
+CSC =Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
 ROOT = Path(__file__).resolve().parent
 BUILD = ROOT / "build"
@@ -36,7 +41,17 @@ LAUNCHER = ROOT / "launcher" / "InkWaveLauncher.cs"
 
 def version() -> str:
     m = re.search(r'AssemblyVersion\("(\d+\.\d+)', LAUNCHER.read_text(encoding="utf-8"))
+    if m is None:
+        sys.exit(f"Keine AssemblyVersion in {LAUNCHER} gefunden.")
     return m.group(1)
+
+
+def sha256(datei: Path) -> str:
+    summe = hashlib.sha256()
+    with open(datei, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            summe.update(block)
+    return summe.hexdigest()
 
 
 def schritt(text):
@@ -49,7 +64,11 @@ def python_holen():
     archiv = CACHE / Path(PY_URL).name
     if not archiv.exists():
         print(f"Lade {PY_URL}")
-        urllib.request.urlretrieve(PY_URL, archiv)
+        teil = archiv.with_name(archiv.name + ".part")     # ein abgebrochener Download bleibt nicht als
+        urllib.request.urlretrieve(PY_URL, teil)           # kaputtes Archiv im Cache liegen
+        teil.replace(archiv)
+    if sha256(archiv) != PY_SHA256:
+        sys.exit(f"Prüfsumme von {archiv.name} stimmt nicht – Datei löschen und neu bauen:\n  {archiv}")
     ziel = STAGE / "python"
     with zipfile.ZipFile(archiv) as z:
         z.extractall(ziel)
@@ -57,14 +76,19 @@ def python_holen():
     (ziel / "python311._pth").write_text(
         "python311.zip\n.\nLib\\site-packages\n..\\app\nimport site\n", encoding="utf-8")
     # Signatur prüfen (Smart App Control lässt nur bekannte/signierte Programme zu)
+    signiert = ["pythonw.exe", "python.exe", "python311.dll"]
+    pfade = ",".join("'" + str(ziel / n).replace("'", "''") + "'" for n in signiert)
     ausgabe = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
-         f"Get-AuthenticodeSignature '{ziel / 'pythonw.exe'}','{ziel / 'python.exe'}','{ziel / 'python311.dll'}' "
+         f"Get-AuthenticodeSignature {pfade} "
          "| ForEach-Object { $_.Status.ToString() + ' ' + $_.SignerCertificate.Subject.Split(',')[0] }"],
         capture_output=True, text=True).stdout.strip().splitlines()
     print("Signaturen:", *ausgabe, sep="\n  ")
-    if any(not z.startswith("Valid") for z in ausgabe):
-        sys.exit("Python-Dateien sind nicht gültig signiert – Abbruch.")
+    # Genau eine Zeile je Datei, jede gültig und von der Python Software Foundation. (Vorher galt auch
+    # eine leere Ausgabe – z. B. wenn PowerShell scheitert – als «alles in Ordnung».)
+    if len(ausgabe) != len(signiert) or any(
+            not z.startswith("Valid ") or "Python Software Foundation" not in z for z in ausgabe):
+        sys.exit("Python-Dateien sind nicht gültig signiert (oder die Prüfung ist gescheitert) – Abbruch.")
 
 
 def pakete_installieren():

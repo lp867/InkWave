@@ -7,6 +7,7 @@ Alles Lange läuft als Auftrag in einem eigenen Prozess (kern.prozess_starten): 
 sofort; angefangene Downloads setzt Hugging Face beim nächsten Mal fort.
 """
 
+import os
 import re
 import shutil
 import threading
@@ -42,11 +43,28 @@ def im_hintergrund(eltern, funktion, rueckruf):
 
     def lauf():
         try:
-            h.fertig.emit(funktion(), None)
+            ergebnis, fehler = funktion(), None
         except Exception as e:
-            h.fertig.emit(None, e)
+            ergebnis, fehler = None, e
+        try:
+            h.fertig.emit(ergebnis, fehler)
+        except RuntimeError:
+            pass          # Fenster wurde inzwischen geschlossen – niemand wartet mehr auf die Antwort
 
     threading.Thread(target=lauf, daemon=True).start()
+
+
+def repo_aus_eingabe(text: str) -> str:
+    """Macht aus der Eingabe den Namen «Besitzer/Modell»: auch aus einem ganzen Link wie
+    https://huggingface.co/Besitzer/Modell/tree/main?x=1 oder hf.co/Besitzer/Modell."""
+    text = text.strip()
+    link = re.match(r"^(?:https?://)?(?:www\.)?(?:huggingface\.co|hf\.co)/(.*)$", text, re.IGNORECASE)
+    if link:
+        teile = [t for t in re.split(r"[?#]", link.group(1))[0].split("/") if t]
+        if teile[:1] == ["models"]:
+            teile = teile[1:]
+        text = "/".join(teile[:2])
+    return text.strip("/")
 
 
 class ModellDialog(QDialog):
@@ -62,8 +80,16 @@ class ModellDialog(QDialog):
         self.start_zeit = 0.0
         self.start_bytes = 0
         self.vorgemerkt = set()           # neu hinzugefügte Repos: gleich angehakt
+        self.fehler = []                  # Fehlermeldungen der laufenden Warteschlange (am Ende zusammen gezeigt)
         self.nvidia_quelle = kern.vorhandene_nvidia_quelle() if gpu else None
-        self.protokoll_pfad = kern.LOKAL / "auftrag.log"
+        # Eigenes Protokoll je InkWave-Fenster: zwei offene Fenster überschrieben sich sonst gegenseitig
+        self.protokoll_pfad = kern.LOKAL / f"auftrag-{os.getpid()}.log"
+        for alt in kern.LOKAL.glob("auftrag*.log"):
+            if alt != self.protokoll_pfad:
+                try:
+                    alt.unlink()          # Reste früherer Sitzungen; ein noch offenes lässt sich nicht löschen
+                except OSError:
+                    pass
         self.timer = QTimer(self)
         self.timer.setInterval(400)
         self.timer.timeout.connect(self._pruefen)
@@ -154,6 +180,8 @@ class ModellDialog(QDialog):
 
         # Fortschritt
         self.lbl_status = QLabel("")
+        # Reiner Text: hier landen Fehlertexte von Hugging Face und pip – nie als HTML deuten
+        self.lbl_status.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(self.lbl_status)
@@ -183,6 +211,12 @@ class ModellDialog(QDialog):
         knoepfe.addWidget(btn_cache)
         knoepfe.addWidget(self.btn_schliessen)
         lay.addLayout(knoepfe)
+
+        # Enter soll nur im Eingabefeld etwas tun. Sonst drückt der Dialog zusätzlich seinen
+        # «Standardknopf» (Hinzufügen) – die Meldung zu einem falschen Namen erschien dadurch doppelt.
+        for knopf in self.findChildren(QPushButton):
+            knopf.setAutoDefault(False)
+            knopf.setDefault(False)
 
         self.fuellen()
 
@@ -305,8 +339,10 @@ class ModellDialog(QDialog):
     # ------------------------------------------------------------ Hinzufügen
 
     def _hinzufuegen(self):
-        repo = self.eingabe.text().strip().removeprefix("https://huggingface.co/").strip("/")
-        if not REPO_MUSTER.match(repo):
+        if self.proc is not None or not self.btn_hinzu.isEnabled():
+            return
+        repo = repo_aus_eingabe(self.eingabe.text())
+        if not (REPO_MUSTER.match(repo) and kern.repo_gueltig(repo)):
             QMessageBox.information(self, "Modell hinzufügen",
                                     "Bitte den Namen so eingeben, wie er auf huggingface.co steht:\n"
                                     "Besitzer/Modell, z. B. Flix-AI/flix-swissgerman-full")
@@ -316,7 +352,9 @@ class ModellDialog(QDialog):
         im_hintergrund(self, lambda: kern.hf_modell_pruefen(repo), self._hinzugefuegt)
 
     def _hinzugefuegt(self, info, fehler):
-        self.btn_hinzu.setEnabled(True)
+        if not self.isVisible():          # Fenster schon zu: Antwort kommt zu spät, nichts mehr ändern
+            return
+        self.btn_hinzu.setEnabled(self.proc is None)
         if fehler is not None:
             self.lbl_status.setText(f"Nicht hinzugefügt: {kern.fehler_text(fehler)}")
             return
@@ -340,12 +378,16 @@ class ModellDialog(QDialog):
     # ------------------------------------------------------------ Aufträge
 
     def _angehakte_starten(self):
+        if self.proc is not None:
+            return
+        self.fehler = []
         self.warteschlange = self._angehakt()
         self._weiter()
 
     def _zusatz(self, auftrag):
         if self.proc is not None:
             return
+        self.fehler = []
         frei = shutil.disk_usage(kern.LOKAL.anchor if not kern.LOKAL.exists() else kern.LOKAL).free
         if frei < 3e9:
             QMessageBox.warning(self, "Zusatzpaket", f"Zu wenig Speicherplatz: nur {kern.groesse_text(frei)} frei "
@@ -360,6 +402,12 @@ class ModellDialog(QDialog):
             self.proc = None
             self.auftrag = None
             self.timer.stop()
+            # Fehler früherer Aufträge der Reihe nicht vom letzten Erfolg überdecken lassen
+            offen = [f for f in self.fehler if f not in self.lbl_status.text()]
+            if offen:
+                self.lbl_status.setText((self.lbl_status.text() + "\n" if self.lbl_status.text() else "")
+                                        + "Nicht geklappt: " + "  ·  ".join(offen))
+            self.fehler = []
             self.fuellen()
             return
         a = self.warteschlange.pop(0)
@@ -370,7 +418,9 @@ class ModellDialog(QDialog):
                 f"Dafür braucht es einmalig das Umwandlungs-Paket (transformers + torch, {UMWANDLUNG_GROESSE}). "
                 "Jetzt einrichten?")
             if antwort != QMessageBox.StandardButton.Yes:
-                self.lbl_status.setText(f"«{a['name']}» nicht umgewandelt (Umwandlungs-Paket fehlt).")
+                self._fehler_merken(f"«{a['name']}» nicht umgewandelt (Umwandlungs-Paket fehlt).")
+                # die übrigen Umwandlungen brauchen dasselbe Paket -> nicht für jede einzeln nachfragen
+                self.warteschlange = [w for w in self.warteschlange if w["art"] != "umwandeln"]
                 self._weiter()
                 return
             self.warteschlange.insert(0, a)
@@ -395,27 +445,47 @@ class ModellDialog(QDialog):
             self.proc = kern.prozess_starten(argumente, self.protokoll_pfad)
         except Exception as e:
             self.proc = None
-            self.lbl_status.setText(f"«{a['name']}» konnte nicht gestartet werden: {e}")
+            self.balken.setRange(0, 1000)
+            self.balken.setValue(0)
+            self._fehler_merken(f"«{a['name']}» konnte nicht gestartet werden: {e}")
             self._weiter()
             return
         self._knoepfe()
         self.timer.start()
 
+    def _fehler_merken(self, text: str):
+        self.fehler.append(text)
+        self.lbl_status.setText(text)
+
     def _protokoll(self) -> dict:
+        """Letzter Stand je Art aus dem Protokoll des Auftrags; «LETZTE» = letzte Zeile überhaupt
+        (bei einem unerwarteten Absturz steht dort der Grund)."""
         werte = {}
         try:
             for zeile in self.protokoll_pfad.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not zeile.strip():
+                    continue
                 art, _, rest = zeile.partition(" ")
                 if art in ("GESAMT", "FERTIG", "FEHLER", "SCHRITT", "ANTEIL"):
                     werte[art] = rest
+                else:
+                    werte["LETZTE"] = zeile.strip()[:300]
         except OSError:
             pass
         return werte
 
+    @staticmethod
+    def _zahl(text, standard=0.0) -> float:
+        """Zahl aus dem Protokoll – eine gerade erst halb geschriebene Zeile darf nichts umwerfen."""
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return standard
+
     def _anteil(self, anteil):
         if self.balken.maximum() == 0:
             self.balken.setRange(0, 1000)
-        self.balken.setValue(int(min(anteil, 1.0) * 1000))
+        self.balken.setValue(int(min(max(anteil, 0.0), 1.0) * 1000))
 
     def _pruefen(self):
         if self.proc is None:
@@ -428,7 +498,7 @@ class ModellDialog(QDialog):
                 self._download_fortschritt(a, p)
             else:
                 if "ANTEIL" in p:
-                    self._anteil(float(p["ANTEIL"]))
+                    self._anteil(self._zahl(p["ANTEIL"]))
                 if "SCHRITT" in p:
                     self.lbl_status.setText(f"«{a['name']}»: {p['SCHRITT']}")
             return
@@ -456,15 +526,22 @@ class ModellDialog(QDialog):
                     self.warteschlange.insert(0, {"art": "umwandeln", "name": m.name, "repo": m.repo,
                                                   "quelle": m.roh_pfad})
         else:
-            self.lbl_status.setText(f"«{a['name']}»: {p.get('FEHLER', f'abgebrochen (Code {ende})')}")
+            grund = p.get("FEHLER") or f"unerwartet beendet (Code {ende})" + (
+                f": {p['LETZTE']}" if p.get("LETZTE") else "")
+            self._fehler_merken(f"«{a['name']}»: {grund}")
             self.balken.setValue(0)
+            if a["art"] == "umwandlung":
+                # ohne Umwandlungs-Paket geht keine Umwandlung -> nicht gleich wieder danach fragen
+                self.warteschlange = [w for w in self.warteschlange if w["art"] != "umwandeln"]
         self.proc = None
         self._weiter()
 
     def _download_fortschritt(self, a, p):
         repo = a["repo"]
         if "GESAMT" in p and not self.gesamt:
-            self.gesamt = int(p["GESAMT"])
+            self.gesamt = int(self._zahl(p["GESAMT"]))
+            if not self.gesamt:
+                return
             self.start_zeit = time.time()            # Tempo ab jetzt messen (ohne Verbindungsaufbau)
             self.start_bytes = kern.cache_bytes(repo)
             cache = kern.hf_cache()
@@ -494,17 +571,16 @@ class ModellDialog(QDialog):
 
     def _abbrechen(self):
         self.warteschlange.clear()
+        self.fehler = []
         if self.proc is not None:
             self.timer.stop()
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except Exception:
-                pass
+            kern.prozess_beenden(self.proc)          # samt Kindprozessen (pip)
             a = self.auftrag or {"name": "", "art": ""}
+            kern.auftrag_reste_loeschen(a["art"], a.get("repo", ""), a.get("quelle", ""))
             self.proc = None
             self.auftrag = None
             self.balken.setRange(0, 1000)
+            self.balken.setValue(0)
             weiter = (" Beim nächsten Mal geht es dort weiter, wo er aufgehört hat."
                       if a["art"] == "download" else "")
             self.lbl_status.setText(f"«{a['name']}» abgebrochen.{weiter}")
@@ -523,6 +599,10 @@ class ModellDialog(QDialog):
                 e.ignore()
                 return
             self._abbrechen()
+        try:
+            self.protokoll_pfad.unlink()
+        except OSError:
+            pass
         kern.einstellungen_speichern(eingerichtet=True)
         e.accept()
 

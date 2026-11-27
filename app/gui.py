@@ -14,21 +14,30 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QMainWindow, QScrollArea, QMessageBox, QPlainTextEdit, QProgressBar,
-                               QPushButton, QSplitter, QStackedWidget, QTabWidget, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QByteArray, QObject, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+                               QHBoxLayout, QHeaderView, QLabel, QMainWindow, QScrollArea, QMessageBox,
+                               QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QStackedWidget, QTabWidget,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import kern
 import theme
+from bausteine import beschriftung, karte, mit_info
 
 APP_NAME = "InkWave"
+# Seiten des Hauptfensters: Name -> (Position im Stapel, Untertitel in der Kopfzeile)
+SEITEN = {
+    "start": (0, "Audio und Video – lokal und offline"),
+    "transkribieren": (1, "Transkribieren  ·  Audio und Video in Text"),
+    "konverter": (2, "MP4 → MP3  ·  Tonspur aus Videos als MP3"),
+    "einstellungen": (3, "Einstellungen"),
+}
 ROLLE_PFAD = Qt.ItemDataRole.UserRole
 ROLLE_ERGEBNIS = Qt.ItemDataRole.UserRole + 1
 ROLLE_ZUSTAND = Qt.ItemDataRole.UserRole + 2     # "wartet" | "läuft" | "fertig" | "fehler"
 ROLLE_FARBE = Qt.ItemDataRole.UserRole + 3       # Farbname aus theme.f für die Status-Spalte
+ROLLE_AUFTRAG = Qt.ItemDataRole.UserRole + 4     # Nummer im laufenden Auftrag (siehe Hauptfenster.starten)
 
 GERAETE = [("auto", "Automatisch"), ("cuda", "Grafikkarte (GPU)"), ("cpu", "Prozessor (CPU)")]
 
@@ -46,19 +55,6 @@ def logo_pixmap(widget, groesse: int):
                                      Qt.TransformationMode.SmoothTransformation)
     bild.setDevicePixelRatio(dpr)
     return bild
-
-
-def karte() -> QFrame:
-    k = QFrame()
-    k.setObjectName("karte")
-    return k
-
-
-def beschriftung(text: str, art: str = "") -> QLabel:
-    lbl = QLabel(text)
-    if art:
-        lbl.setObjectName(art)
-    return lbl
 
 
 # ---------------------------------------------------------------- Arbeiter (eigener Thread)
@@ -79,6 +75,7 @@ class Arbeiter(QObject):
     def __init__(self):
         super().__init__()
         self.abbrechen = threading.Event()
+        self.ausgelassen = set()      # Auftragsnummern, die während des Laufs aus der Liste entfernt wurden
         self._modell = self._batch = self._dev = None
         self._schluessel = None
 
@@ -89,19 +86,27 @@ class Arbeiter(QObject):
 
     @Slot()
     def pruefen(self):
-        """Beim Start im Hintergrund: Grafikkarte, Kerne, Modelle (Import von faster-whisper dauert)."""
-        gpu = kern.gpu_vorhanden()
-        self.hardware.emit({
-            "gpu": gpu,
-            "name": kern.gpu_name() if gpu else "",
-            "paket": kern.gpu_paket_vorhanden() if gpu else False,
-            "kerne": kern.physische_kerne(),
-            "modelle": kern.modell_liste(),
-        })
+        """Beim Start im Hintergrund: Grafikkarte, Kerne, Modelle (Import von faster-whisper dauert).
+        Meldet sich immer zurück – sonst bliebe das Fenster bei «Modelle werden gesucht …» stehen."""
+        info = {"gpu": False, "name": "", "paket": False, "kerne": max(1, (os.cpu_count() or 2) // 2),
+                "modelle": []}
+        try:
+            info["gpu"] = kern.gpu_vorhanden()
+            info["name"] = kern.gpu_name() if info["gpu"] else ""
+            info["paket"] = kern.gpu_paket_vorhanden() if info["gpu"] else False
+            info["kerne"] = kern.physische_kerne()
+        except Exception as e:
+            self.protokoll.emit(f"Hardware konnte nicht geprüft werden: {type(e).__name__}: {e}")
+        try:
+            info["modelle"] = kern.modell_liste()
+        except Exception as e:
+            self.protokoll.emit(f"Modelle konnten nicht gelesen werden: {type(e).__name__}: {e}")
+        self.hardware.emit(info)
 
     @Slot(object)
     def arbeiten(self, auftrag: dict):
-        self.abbrechen.clear()
+        # abbrechen wird beim Start im Fenster zurückgesetzt, nicht hier: sonst ginge ein Klick auf
+        # «Abbrechen» verloren, der kommt, bevor dieser Thread den Auftrag aufgenommen hat
         kern.schonend_rechnen(auftrag["schonend"])
         try:
             m = kern.modell_finden(auftrag["modell"])
@@ -111,6 +116,7 @@ class Arbeiter(QObject):
             schluessel = (m.name, m.pfad, auftrag["geraet"], auftrag["threads"], kern.gpu_paket_vorhanden())
             if schluessel != self._schluessel:
                 self._modell = self._batch = None      # altes Modell zuerst freigeben (Speicher)
+                self._schluessel = None                # scheitert das Laden, gilt das alte nicht mehr als geladen
                 gc.collect()
                 self._modell, self._batch, self._dev = kern.modell_laden(
                     m, auftrag["geraet"], self._melden, threads=auftrag["threads"])
@@ -118,9 +124,11 @@ class Arbeiter(QObject):
             self.geraet_bereit.emit(self._dev)
 
             with kern.WachHalten():
-                for zeile, datei in auftrag["dateien"]:
+                for zeile, datei in auftrag["dateien"]:      # zeile = Auftragsnummer, nicht Listenposition
                     if self.abbrechen.is_set():
                         break
+                    if zeile in self.ausgelassen:
+                        continue
                     self.datei_start.emit(zeile)
 
                     def melden(art, _z=zeile, **d):
@@ -162,7 +170,8 @@ class DropFlaeche(QFrame):
     """Grosse Ablagefläche, solange noch keine Dateien in der Liste sind."""
     abgelegt = Signal(list)
 
-    def __init__(self):
+    def __init__(self, titel="Dateien hierher ziehen", untertitel="auch ganze Ordner",
+                 knopf="Dateien wählen …"):
         super().__init__()
         self.setObjectName("dropzone")
         self.setAcceptDrops(True)
@@ -177,16 +186,16 @@ class DropFlaeche(QFrame):
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.logo)
         lay.addSpacing(8)
-        t = beschriftung("Audio- oder Videodateien hierher ziehen", "gross")
+        t = beschriftung(titel, "gross")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(t)
-        u = beschriftung("auch ganze Ordner · mp3, m4a, wav, flac, ogg, mp4, mkv, mov …", "gedaempft")
+        u = beschriftung(untertitel, "gedaempft")
         u.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(u)
         lay.addSpacing(14)
         knoepfe = QHBoxLayout()
         knoepfe.addStretch(1)
-        self.btn_dateien = QPushButton("Dateien wählen …")
+        self.btn_dateien = QPushButton(knopf)
         self.btn_ordner = QPushButton("Ordner wählen …")
         knoepfe.addWidget(self.btn_dateien)
         knoepfe.addWidget(self.btn_ordner)
@@ -261,12 +270,27 @@ class Hauptfenster(QMainWindow):
         # Grösse passend zum Bildschirm (auch für kleine Laptops)
         frei = self.screen().availableGeometry()
         self.resize(min(1140, int(frei.width() * 0.92)), min(840, int(frei.height() * 0.9)))
-        self.setMinimumSize(860, 560)
+        # Mindestgrösse nie grösser als der Bildschirm (kleine Laptops mit 175–200 % Skalierung)
+        self.setMinimumSize(max(480, min(860, frei.width() - 20)), max(360, min(560, frei.height() - 50)))
+        if kern.einstellung("fenster_merken", True):
+            try:   # Grösse und Position vom letzten Mal (Qt holt das Fenster selbst auf einen vorhandenen Bildschirm)
+                self.restoreGeometry(QByteArray.fromBase64(kern.einstellung("fenster", "").encode("ascii")))
+            except (UnicodeError, ValueError):
+                pass
         self.setAcceptDrops(True)
 
+        self.thema = thema
+        self.seite = "start"
+        self.vorige_seite = "start"
+        self.hardware_da = False
         self.gpu = False
         self.gpu_name = ""
         self.laeuft = False
+        self.hinweis = ""
+        self.empfohlen = ""
+        self.dialog_offen = False
+        self.auftrag_nr = 0               # fortlaufende Nummer für jede Datei eines Auftrags
+        self.auftrag_zeilen = {}          # Auftragsnummer -> Listenzeile (bleibt richtig, wenn Zeilen entfernt werden)
         self.modelle = []
         self.datei_start_zeit = 0.0
         self.datei_sprache = ""
@@ -303,11 +327,18 @@ class Hauptfenster(QMainWindow):
             self.dateien_hinzufuegen(list(start_dateien))
         self.cb_modell.addItem("Modelle werden gesucht …")
         self._knoepfe_aktualisieren()
+        # Mit Dateien gestartet (auf die exe gezogen): gleich zum Transkribieren, sonst die gewählte Startseite
+        start = "transkribieren" if start_dateien else kern.einstellung("start_seite", "start")
+        self.seite_zeigen(start if start in ("start", "transkribieren", "konverter") else "start")
         self.pruef_anfrage.emit()
 
     # ------------------------------------------------------------ Aufbau
 
     def _oberflaeche_bauen(self):
+        from einstellungen_seite import EinstellungenSeite
+        from konverter_seite import KonverterSeite
+        from start_seite import StartSeite
+
         zentral = QWidget()
         self.setCentralWidget(zentral)
         haupt = QVBoxLayout(zentral)
@@ -315,6 +346,7 @@ class Hauptfenster(QMainWindow):
         haupt.setSpacing(14)
         haupt.addLayout(self._kopf_bauen())
 
+        # Seite «Transkribieren»: oben Dateien und Einstellungen, unten Text und Protokoll
         oben = QWidget()
         reihe = QHBoxLayout(oben)
         reihe.setContentsMargins(0, 0, 0, 0)
@@ -329,25 +361,43 @@ class Hauptfenster(QMainWindow):
         teiler.setStretchFactor(1, 2)
         teiler.setChildrenCollapsible(False)
         teiler.setHandleWidth(14)
-        haupt.addWidget(teiler, 1)
+
+        self.start = StartSeite()
+        self.start.gewaehlt.connect(self.seite_zeigen)
+        self.start.abgelegt.connect(self._auf_kachel_abgelegt)
+        self.start.output_oeffnen.connect(self._output_oeffnen)
+        self.konverter = KonverterSeite()
+        self.konverter.zustand_geaendert.connect(self._start_hinweise)
+        self.konverter.alles_fertig.connect(self._fertig_aktionen)
+        self.einstellungen = EinstellungenSeite()
+        self.einstellungen.thema_geaendert.connect(self._thema_anwenden)
+        self.einstellungen.modelle_oeffnen.connect(lambda: self.modelle_oeffnen())
+        self.einstellungen.zurueckgesetzt.connect(self._zurueckgesetzt)
+
+        self.seiten = QStackedWidget()        # Reihenfolge wie in SEITEN
+        for seite in (self.start, teiler, self.konverter, self.einstellungen):
+            self.seiten.addWidget(seite)
+        haupt.addWidget(self.seiten, 1)
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Back), self, activated=self.zurueck)
 
     def _teiler_anpassen(self):
-        """Beim Start: oben so viel Platz, dass die Einstellungen ganz sichtbar sind; Rest für den Text."""
+        """Beim ersten Öffnen: oben so viel Platz, dass die Einstellungen ganz sichtbar sind; Rest für den Text."""
         noetig = self.innen.sizeHint().height() + 8
         gesamt = sum(self.teiler.sizes())
+        if gesamt <= 0:
+            return
         oben = max(min(noetig, gesamt - 170), int(gesamt * 0.5))
         self.teiler.setSizes([oben, gesamt - oben])
-
-    def showEvent(self, e):
-        super().showEvent(e)
-        if not getattr(self, "_angepasst", False):
-            self._angepasst = True
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(0, self._teiler_anpassen)
 
     def _kopf_bauen(self):
         kopf = QHBoxLayout()
         kopf.setSpacing(12)
+        self.btn_zurueck = QPushButton("‹  Start")
+        self.btn_zurueck.setObjectName("zurueck")
+        self.btn_zurueck.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_zurueck.clicked.connect(self.zurueck)
+        self.btn_zurueck.hide()
+        kopf.addWidget(self.btn_zurueck, 0, Qt.AlignmentFlag.AlignVCenter)
         logo = QLabel()
         bild = logo_pixmap(self, 48)
         if bild is not None:
@@ -356,7 +406,8 @@ class Hauptfenster(QMainWindow):
         t = QVBoxLayout()
         t.setSpacing(0)
         t.addWidget(beschriftung(APP_NAME, "titel"))
-        t.addWidget(beschriftung("Audio und Video lokal in Text verwandeln – offline, mit Whisper", "untertitel"))
+        self.lbl_untertitel = beschriftung(SEITEN["start"][1], "untertitel")
+        t.addWidget(self.lbl_untertitel)
         kopf.addLayout(t)
         kopf.addStretch(1)
         self.lbl_hardware = beschriftung("Hardware wird geprüft …", "chip")
@@ -367,7 +418,77 @@ class Hauptfenster(QMainWindow):
         self.btn_gpu.clicked.connect(lambda: self.modelle_oeffnen())
         self.btn_gpu.hide()
         kopf.addWidget(self.btn_gpu, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.btn_einstellungen = QPushButton("Einstellungen")
+        self.btn_einstellungen.setObjectName("link")
+        self.btn_einstellungen.clicked.connect(lambda: self.seite_zeigen("einstellungen"))
+        kopf.addWidget(self.btn_einstellungen, 0, Qt.AlignmentFlag.AlignVCenter)
         return kopf
+
+    # ------------------------------------------------------------ Seiten
+
+    def seite_zeigen(self, name: str):
+        """Wechselt zu "start", "transkribieren", "konverter" oder "einstellungen"."""
+        if name not in SEITEN:
+            return
+        if name != self.seite:
+            self.vorige_seite = self.seite
+        self.seite = name
+        self.seiten.setCurrentIndex(SEITEN[name][0])
+        self.lbl_untertitel.setText(SEITEN[name][1])
+        self.btn_zurueck.setVisible(name != "start")
+        # aus den Einstellungen geht es dorthin zurück, wo man herkam
+        self.btn_zurueck.setText("‹  Zurück" if name == "einstellungen" and self.vorige_seite != "start"
+                                 else "‹  Start")
+        self.btn_einstellungen.setVisible(name != "einstellungen")
+        if name == "einstellungen":
+            self.einstellungen.laden()
+        if name == "transkribieren":
+            if not getattr(self, "_angepasst", False):
+                self._angepasst = True
+                QTimer.singleShot(0, self._teiler_anpassen)
+            self._erster_start_pruefen()
+
+    def zurueck(self):
+        if self.seite == "einstellungen" and self.vorige_seite != "einstellungen":
+            self.seite_zeigen(self.vorige_seite)
+        else:
+            self.seite_zeigen("start")
+
+    def _auf_kachel_abgelegt(self, werkzeug: str, pfade: list):
+        self.seite_zeigen(werkzeug)
+        (self.konverter.dateien_hinzufuegen if werkzeug == "konverter" else self.dateien_hinzufuegen)(pfade)
+
+    def _start_hinweise(self):
+        """Kleine Schilder auf den Kacheln der Startseite: läuft gerade etwas, liegen Dateien bereit?"""
+        def text(laeuft, n):
+            return "läuft …" if laeuft else (f"{n} bereit" if n else "")
+        self.start.hinweis("transkribieren", text(self.laeuft, self.liste.topLevelItemCount()))
+        self.start.hinweis("konverter", text(self.konverter.laeuft, self.konverter.liste.topLevelItemCount()))
+
+    def _thema_anwenden(self):
+        if self.thema is not None:
+            self.thema.anwenden()
+
+    def _zurueckgesetzt(self):
+        self._einstellungen_laden()
+        self.konverter._einstellungen_laden()
+
+    def _fertig_aktionen(self, anzahl_fertig: int):
+        """Nach einem fertigen Lauf: Taskleiste blinkt; auf Wunsch Hinweiston und Output-Ordner öffnen."""
+        QApplication.alert(self)
+        if anzahl_fertig <= 0:
+            return
+        if kern.einstellung("fertig_ton", False):
+            QApplication.beep()
+        if kern.einstellung("fertig_ordner", False):
+            self._output_oeffnen()
+
+    def _erster_start_pruefen(self):
+        """Beim allerersten Öffnen von «Transkribieren»: Modelle auswählen lassen."""
+        if (self.hardware_da and self.seite == "transkribieren" and not getattr(self, "_erster_start_gezeigt", False)
+                and not kern.einstellungen_lesen().get("eingerichtet")):
+            self._erster_start_gezeigt = True
+            QTimer.singleShot(200, lambda: self.modelle_oeffnen(erster_start=True))
 
     def _dateien_bauen(self):
         k = karte()
@@ -427,9 +548,11 @@ class Hauptfenster(QMainWindow):
         lay.addWidget(beschriftung("Einstellungen", "abschnitt"))
         lay.addSpacing(4)
 
-        zeile = QHBoxLayout()
-        zeile.addWidget(beschriftung("Modell", "gedaempft"))
-        zeile.addStretch(1)
+        zeile = mit_info(
+            "Modell",
+            "Das Whisper-Modell, das den Text erkennt. Grössere Modelle sind genauer, aber langsamer.\n\n"
+            "✓ = heruntergeladen und bereit. Weitere Modelle lädst du über «Modelle verwalten …».\n"
+            "★ = für diesen PC empfohlen.", "Modell")
         self.btn_modelle = QPushButton("Modelle verwalten …")
         self.btn_modelle.setObjectName("link")
         self.btn_modelle.setToolTip("Modelle herunterladen, Hugging-Face-Modelle hinzufügen, Zusatzpakete")
@@ -441,10 +564,16 @@ class Hauptfenster(QMainWindow):
         self.cb_modell.currentIndexChanged.connect(self._modell_info)
         lay.addWidget(self.cb_modell)
         self.lbl_modell_info = beschriftung("", "gedaempft")     # eine Zeile, voller Text als Tooltip
+        self.lbl_modell_info.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_modell_info.setMinimumWidth(1)
         lay.addWidget(self.lbl_modell_info)
 
-        lay.addWidget(beschriftung("Sprache", "gedaempft"))
+        lay.addLayout(mit_info(
+            "Sprache",
+            "Automatisch erkennen oder fest einstellen – alle 100 Sprachen von Whisper. Fest eingestellt "
+            "ist es etwas schneller und bei kurzen oder leisen Aufnahmen zuverlässiger.\n\n"
+            "Für das Schweizer Modell (Flix): «Automatisch» oder «Deutsch».\n\n"
+            "Tipp: Liste öffnen und den Anfangsbuchstaben tippen.", "Sprache"))
         self.cb_sprache = QComboBox()             # nur auswählen, nicht tippen (keine Tippfehler)
         self.cb_sprache.setMaxVisibleItems(16)
         for code, name in kern.sprach_auswahl():
@@ -452,13 +581,13 @@ class Hauptfenster(QMainWindow):
                 self.cb_sprache.insertSeparator(self.cb_sprache.count())
             else:
                 self.cb_sprache.addItem(name, code)
-        self.cb_sprache.setToolTip("Automatisch erkennen oder fest einstellen – alle 100 Sprachen von Whisper.\n"
-                                   "Für das Schweizer Modell (Flix): «Automatisch» oder «Deutsch».\n"
-                                   "Tipp: Liste offen und Anfangsbuchstaben tippen springt zur Sprache.")
         lay.addWidget(self.cb_sprache)
         lay.addSpacing(4)
 
-        lay.addWidget(beschriftung("Rechnen auf", "gedaempft"))
+        lay.addLayout(mit_info(
+            "Rechnen auf",
+            "Automatisch: nimmt die NVIDIA-Grafikkarte, wenn eine da ist und das GPU-Paket eingerichtet "
+            "ist – sonst den Prozessor.\n\nMit Grafikkarte geht es um ein Vielfaches schneller.", "Rechnen auf"))
         self.cb_geraet = QComboBox()
         for code, name in GERAETE:
             self.cb_geraet.addItem(name, code)
@@ -468,10 +597,11 @@ class Hauptfenster(QMainWindow):
         self.chk_srt = QCheckBox(".srt-Untertitel erstellen")
         self.chk_zeit = QCheckBox("Zeitstempel in der .txt")
         self.chk_schonend = QCheckBox("Schonend rechnen")
-        self.chk_schonend.setToolTip("Niedrigere Priorität: der PC bleibt gut bedienbar, "
-                                     "die Transkription dauert etwas länger.")
-        for c in (self.chk_srt, self.chk_zeit, self.chk_schonend):
-            lay.addWidget(c)
+        lay.addLayout(mit_info(self.chk_srt, "Speichert zusätzlich zur .txt eine Untertitel-Datei (.srt) mit "
+                                             "Zeitangaben – z. B. für Videoplayer oder Schnittprogramme."))
+        lay.addWidget(self.chk_zeit)
+        lay.addLayout(mit_info(self.chk_schonend, "Niedrigere Priorität: der PC bleibt gut bedienbar, die "
+                                                  "Transkription dauert etwas länger."))
         lay.addStretch(1)
 
         self.btn_start = QPushButton("Transkribieren")
@@ -500,6 +630,8 @@ class Hauptfenster(QMainWindow):
         fort.addWidget(self.lbl_prozent)
         lay.addLayout(fort)
         self.lbl_status = beschriftung("Bereit.", "gedaempft")
+        # Reiner Text: hier landen Dateinamen und Fehlertexte von aussen – nie als HTML deuten
+        self.lbl_status.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setMinimumHeight(self.lbl_status.fontMetrics().lineSpacing() * 2)
         self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
@@ -532,10 +664,11 @@ class Hauptfenster(QMainWindow):
 
     def _einstellungen_laden(self):
         e = kern.einstellungen_lesen()
-        code = e.get("sprache", "")
-        i = self.cb_sprache.findData(code)
+        code = e.get("sprache")
+        i = self.cb_sprache.findData(code) if isinstance(code, str) and code else 0
         self.cb_sprache.setCurrentIndex(i if i >= 0 else 0)
-        i = self.cb_geraet.findData(e.get("geraet", "auto"))
+        geraet = e.get("geraet")
+        i = self.cb_geraet.findData(geraet if isinstance(geraet, str) else "auto")
         self.cb_geraet.setCurrentIndex(max(i, 0))
         self.chk_srt.setChecked(bool(e.get("srt", False)))
         self.chk_zeit.setChecked(bool(e.get("zeitstempel", False)))
@@ -571,17 +704,22 @@ class Hauptfenster(QMainWindow):
         self.protokollieren(f"Daten-Ordner: {kern.DATEN}")
         self.protokollieren("Hardware: " + self.lbl_hardware.text().replace("⚡ ", ""))
         self.modelle_fuellen(info["modelle"])
-        if not kern.einstellungen_lesen().get("eingerichtet"):
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(200, lambda: self.modelle_oeffnen(erster_start=True))
+        self.hardware_da = True
+        self._erster_start_pruefen()
 
     def modelle_oeffnen(self, erster_start=False):
+        if self.dialog_offen or self.laeuft:       # nie doppelt und nicht mitten in einer Transkription
+            return
         from modelle_dialog import ModellDialog
-        dialog = ModellDialog(self, self.gpu, erster_start)
-        dialog.exec()
+        self.dialog_offen = True
+        try:
+            dialog = ModellDialog(self, self.gpu, erster_start)
+            dialog.exec()
+            dialog.deleteLater()
+        finally:
+            self.dialog_offen = False
         self.modelle_fuellen()
         self._hardware_anzeigen()
-        dialog.deleteLater()
 
     def modelle_fuellen(self, modelle=None):
         letztes = self.cb_modell.currentData() or kern.einstellungen_lesen().get("modell")
@@ -643,6 +781,7 @@ class Hauptfenster(QMainWindow):
         bild = logo_pixmap(self, 64)
         if bild is not None:
             self.drop.logo.setPixmap(bild)
+        self.konverter.farben_auffrischen()
 
     def dateien_hinzufuegen(self, eingaben):
         dateien, fehlend = kern.dateien_sammeln(eingaben)
@@ -682,25 +821,40 @@ class Hauptfenster(QMainWindow):
     def _dateien_waehlen(self):
         filter_ = "Audio/Video (" + " ".join(f"*{e}" for e in sorted(kern.AUDIO_ENDUNGEN)) + ");;Alle Dateien (*.*)"
         pfade, _ = QFileDialog.getOpenFileNames(self, "Audio- oder Videodateien wählen",
-                                                kern.einstellungen_lesen().get("letzter_ordner", ""), filter_)
+                                                self._letzter_ordner(), filter_)
         if pfade:
             kern.einstellungen_speichern(letzter_ordner=str(Path(pfade[0]).parent))
             self.dateien_hinzufuegen(pfade)
 
     def _ordner_waehlen(self):
         ordner = QFileDialog.getExistingDirectory(self, "Ordner wählen (wird mit Unterordnern durchsucht)",
-                                                  kern.einstellungen_lesen().get("letzter_ordner", ""))
+                                                  self._letzter_ordner())
         if ordner:
             kern.einstellungen_speichern(letzter_ordner=ordner)
             self.dateien_hinzufuegen([ordner])
 
+    @staticmethod
+    def _letzter_ordner() -> str:
+        ordner = kern.einstellungen_lesen().get("letzter_ordner")
+        return ordner if isinstance(ordner, str) else ""
+
     def _entfernen(self):
         for item in self.liste.selectedItems():
-            if item.data(0, ROLLE_ZUSTAND) != "läuft":
-                self.liste.takeTopLevelItem(self.liste.indexOfTopLevelItem(item))
+            if item.data(0, ROLLE_ZUSTAND) == "läuft":
+                continue
+            # Gehört die Zeile zum laufenden Auftrag: dem Arbeiter sagen, dass er sie auslassen soll.
+            # (Früher liefen die Rückmeldungen über die Listenposition – nach dem Entfernen trafen sie
+            # die falsche oder gar keine Zeile, und die entfernte Datei wurde trotzdem transkribiert.)
+            nr = item.data(0, ROLLE_AUFTRAG)
+            if self.auftrag_zeilen.pop(nr, None) is not None and self.laeuft:
+                self.arbeiter.ausgelassen.add(nr)
+                if item.data(0, ROLLE_ZUSTAND) == "wartet":
+                    self.anzahl_auftrag = max(self.anzahl_auftrag - 1, 1)
+            self.liste.takeTopLevelItem(self.liste.indexOfTopLevelItem(item))
         self._knoepfe_aktualisieren()
 
     def _leeren(self):
+        self.auftrag_zeilen.clear()
         self.liste.clear()
         self.txt_vorschau.clear()
         self.balken.setValue(0)
@@ -713,7 +867,10 @@ class Hauptfenster(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(e.txt)))
 
     def _output_oeffnen(self):
-        kern.OUTPUT_ORDNER.mkdir(parents=True, exist_ok=True)
+        try:
+            kern.OUTPUT_ORDNER.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(kern.OUTPUT_ORDNER)))
 
     def dragEnterEvent(self, e):
@@ -721,8 +878,13 @@ class Hauptfenster(QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
+        # irgendwo ins Fenster gezogen: gehört zum Werkzeug, das gerade offen ist (sonst zum Transkribieren)
         if _pfade(e):
-            self.dateien_hinzufuegen(_pfade(e))
+            if self.seite == "konverter":
+                self.konverter.dateien_hinzufuegen(_pfade(e))
+            else:
+                self.seite_zeigen("transkribieren")
+                self.dateien_hinzufuegen(_pfade(e))
 
     # ------------------------------------------------------------ Starten / Abbrechen
 
@@ -742,34 +904,56 @@ class Hauptfenster(QMainWindow):
         self.btn_abbrechen.setEnabled(self.laeuft)
         for w in (self.btn_dateien, self.btn_ordner, self.drop.btn_dateien, self.drop.btn_ordner,
                   self.cb_modell, self.cb_sprache, self.cb_geraet, self.chk_srt, self.chk_zeit,
-                  self.chk_schonend, self.btn_modelle):
+                  self.chk_schonend, self.btn_modelle, self.btn_gpu):
             w.setEnabled(not self.laeuft)
         self.btn_leeren.setEnabled(not self.laeuft and n > 0)
         self.btn_entfernen.setEnabled(n > 0)
+        self._start_hinweise()
 
     def _gesamt(self, anteil: float):
+        anteil = min(max(anteil, 0.0), 1.0)
         self.balken.setValue(int(anteil * 1000))
         self.lbl_prozent.setText(f"{round(anteil * 100)} %")
 
+    def _auftrag_zeile(self, nr):
+        """Listenzeile zu einer Auftragsnummer – None, wenn sie inzwischen entfernt wurde."""
+        return self.auftrag_zeilen.get(nr)
+
     def starten(self):
+        if self.laeuft:
+            return
         sprache = self._sprache_code()
         self._hardware_anzeigen()                 # GPU-Paket vor jedem Start neu prüfen
         modell = self.cb_modell.currentData()
-        if not modell:
+        if not modell or not any(m.name == modell and m.bereit for m in self.modelle):
             QMessageBox.information(self, APP_NAME, "Bitte zuerst ein Modell herunterladen.")
             return
+        problem = kern.ausgabe_pruefen()          # jetzt prüfen, nicht erst nach der langen Rechnung
+        if problem:
+            QMessageBox.warning(
+                self, APP_NAME,
+                f"In den Output-Ordner kann nicht geschrieben werden:\n{problem}\n\n"
+                "Schreibgeschützter Ordner, oder blockiert der «Überwachte Ordnerzugriff» von Windows? "
+                "Der Output-Ordner lässt sich in den Einstellungen ändern.")
+            return
         dateien = []
-        for i, item in enumerate(self._zeilen()):
+        self.auftrag_zeilen = {}
+        self.arbeiter.ausgelassen.clear()
+        for item in self._zeilen():
             if item.data(0, ROLLE_ZUSTAND) == "fertig":
                 continue
             item.setData(0, ROLLE_ZUSTAND, "wartet")
             self._status_setzen(item, "Wartet")
             self._zeilen_balken(item).setValue(0)
-            dateien.append((i, Path(item.data(0, ROLLE_PFAD))))
+            self.auftrag_nr += 1
+            item.setData(0, ROLLE_AUFTRAG, self.auftrag_nr)
+            self.auftrag_zeilen[self.auftrag_nr] = item
+            dateien.append((self.auftrag_nr, Path(item.data(0, ROLLE_PFAD))))
         if not dateien:
             self.lbl_status.setText("Alle Dateien sind schon fertig. Neue Dateien hinzufügen oder Liste leeren.")
             return
 
+        self.hinweis = ""
         kern.einstellungen_speichern(modell=modell)
         self._einstellungen_speichern()
         self.laeuft = True
@@ -779,11 +963,12 @@ class Hauptfenster(QMainWindow):
         self._knoepfe_aktualisieren()
         self.protokollieren(f"Start: {len(dateien)} Datei(en), Modell {modell}, "
                             f"Sprache {sprache or 'automatisch'}")
+        self.arbeiter.abbrechen.clear()
         self.auftrag.emit({
             "dateien": dateien, "modell": modell, "geraet": self.cb_geraet.currentData(), "sprache": sprache,
             "srt": self.chk_srt.isChecked(), "zeitstempel": self.chk_zeit.isChecked(),
             "schonend": self.chk_schonend.isChecked(),
-            "threads": kern.cpu_threads(int(kern.einstellungen_lesen().get("cpu_threads") or 0)),
+            "threads": kern.cpu_threads(kern.cpu_threads_einstellung()),
         })
 
     def abbrechen(self):
@@ -804,7 +989,9 @@ class Hauptfenster(QMainWindow):
         self._hardware_anzeigen()
 
     def _datei_start(self, zeile):
-        item = self.liste.topLevelItem(zeile)
+        item = self._auftrag_zeile(zeile)
+        if item is None:
+            return
         item.setData(0, ROLLE_ZUSTAND, "läuft")
         self._status_setzen(item, "Läuft …", "akzent_text")
         self.liste.scrollToItem(item)
@@ -821,12 +1008,14 @@ class Hauptfenster(QMainWindow):
             self.protokollieren(f"Erkannte Sprache: {sprache} ({wahrscheinlichkeit:.0%})")
 
     def _fortschritt(self, zeile, anteil, position, dauer):
-        item = self.liste.topLevelItem(zeile)
+        item = self._auftrag_zeile(zeile)
+        if item is None:
+            return
         self._zeilen_balken(item).setValue(int(anteil * 1000))
         vergangen = max(time.time() - self.datei_start_zeit, 0.1)
         tempo = position / vergangen
         self._status_setzen(item, f"Läuft {anteil:.0%} · {tempo:.1f}x Echtzeit", "akzent_text")
-        self._gesamt((self.fertig_auftrag + anteil) / self.anzahl_auftrag)
+        self._gesamt((self.fertig_auftrag + anteil) / max(self.anzahl_auftrag, 1))
         name = Path(item.data(0, ROLLE_PFAD)).name
         teile = [f"Datei {self.fertig_auftrag + 1} von {self.anzahl_auftrag}: {name}"]
         if self.datei_sprache:
@@ -836,6 +1025,8 @@ class Hauptfenster(QMainWindow):
         self.lbl_status.setText("  ·  ".join(teile))
 
     def _segment(self, zeile, text):
+        if self._auftrag_zeile(zeile) is None:
+            return
         if self.vorschau_kopf:
             if not self.txt_vorschau.document().isEmpty():
                 self.txt_vorschau.appendPlainText("")
@@ -844,7 +1035,10 @@ class Hauptfenster(QMainWindow):
         self.txt_vorschau.appendPlainText(text)
 
     def _datei_fertig(self, zeile, e):
-        item = self.liste.topLevelItem(zeile)
+        item = self._auftrag_zeile(zeile)
+        if item is None:
+            self.protokollieren(f"Fertig (Zeile wurde entfernt): {e.datei.name} → {e.txt.name}")
+            return
         item.setData(0, ROLLE_ZUSTAND, "fertig")
         item.setData(0, ROLLE_ERGEBNIS, e)
         self._status_setzen(item, f"✓ Fertig · {e.sprache} · {kern.zeit(e.dauer)} · {e.tempo:.1f}x", "erfolg")
@@ -856,7 +1050,9 @@ class Hauptfenster(QMainWindow):
                             + f" ({e.benoetigt:.0f} s, {e.tempo:.1f}x Echtzeit)")
 
     def _datei_fehler(self, zeile, kurz, lang):
-        item = self.liste.topLevelItem(zeile)
+        item = self._auftrag_zeile(zeile)
+        if item is None:
+            return
         if kurz == "Abgebrochen":
             item.setData(0, ROLLE_ZUSTAND, "wartet")
             self._status_setzen(item, "Abgebrochen")
@@ -882,21 +1078,27 @@ class Hauptfenster(QMainWindow):
             self.lbl_status.setText(f"✓ Alles erledigt: {fertig} fertig" + (f", {fehler} mit Problem" if fehler else "")
                                     + ". Die Texte liegen im Output-Ordner."
                                     + (f"\n{self.hinweis}" if getattr(self, "hinweis", "") else ""))
+            self._fertig_aktionen(sum(1 for item in self.auftrag_zeilen.values()
+                                      if item.data(0, ROLLE_ZUSTAND) == "fertig"))
         self.protokollieren("Abgebrochen." if abgebrochen else "Erledigt.")
 
     # ------------------------------------------------------------ Schliessen
 
     def closeEvent(self, e):
-        if self.laeuft:
+        if self.laeuft or self.konverter.laeuft:
+            was = "transkribiert" if self.laeuft else "umgewandelt"
             antwort = QMessageBox.question(self, APP_NAME,
-                                           "Es wird gerade transkribiert. Wirklich beenden?\n"
+                                           f"Es wird gerade {was}. Wirklich beenden?\n"
                                            "Die laufende Datei wird nicht gespeichert.")
             if antwort != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
             self.arbeiter.abbrechen.set()
         self._einstellungen_speichern()
+        if kern.einstellung("fenster_merken", True):
+            kern.einstellungen_speichern(fenster=bytes(self.saveGeometry().toBase64()).decode("ascii"))
+        konverter_fertig = self.konverter.beenden()      # bricht ab; halbe MP3s werden dabei gelöscht
         self.thread_.quit()
-        if not self.thread_.wait(3000):
+        if not self.thread_.wait(3000) or not konverter_fertig:
             os._exit(0)        # Modell hängt noch in einer langen Berechnung – hart beenden
         e.accept()

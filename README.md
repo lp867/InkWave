@@ -1,8 +1,15 @@
 # InkWave
 
-Verwandelt Audio und Video lokal und offline in Text – mit Whisper (faster-whisper).
-Hell oder dunkel wie Windows, mit dem Logo «Wellen zu Worten». Bis Version 1.0.1 hiess die App «Transcriber».
-Eigene Windows-App statt Terminal. Läuft mit NVIDIA-Grafikkarte (schnell) und ohne (CPU, int8).
+Werkzeuge für Audio und Video – alles lokal und offline. Auf der Startseite wählt man, was man tun will:
+
+- **Transkribieren** – Audio und Video in Text verwandeln, mit Whisper (faster-whisper).
+  Läuft mit NVIDIA-Grafikkarte (schnell) und ohne (CPU, int8).
+- **MP4 → MP3** – die Tonspur aus Videos (mp4, mov, mkv, webm …) als MP3 speichern, mehrere gleichzeitig.
+  Rechnet mit dem PyAV, das für die Transkription ohnehin dabei ist – kein eigenes `ffmpeg.exe`.
+
+Unter **Einstellungen**: Design (wie Windows / hell / dunkel), Startseite, Output-Ordner, Hinweiston,
+Fenstergrösse merken, Prozessor-Threads. Die Oberfläche kommt mit wenig Text aus; Erklärungen stecken
+hinter dem kleinen «i». Logo «Wellen zu Worten». Bis Version 1.0.1 hiess die App «Transcriber».
 
 ## Installieren
 
@@ -16,9 +23,9 @@ Neben der exe legt die App an:
 
 | Ordner/Datei | Inhalt |
 |---|---|
-| `output\` | fertige `.txt` (und `.srt`), nie überschrieben (`name_2.txt`, …) |
+| `output\` | fertige `.txt` (und `.srt`) und MP3s, nie überschrieben (`name_2.txt`, …); in den Einstellungen änderbar |
 | `modelle\` | eigene und umgewandelte Modelle |
-| `einstellungen.json` | zuletzt gewähltes Modell und Optionen |
+| `einstellungen.json` | zuletzt gewähltes Modell, Optionen und App-Einstellungen |
 
 Heruntergeladene Standardmodelle liegen im Hugging-Face-Cache (`%USERPROFILE%\.cache\huggingface\hub`).
 In `%LOCALAPPDATA%\InkWave` liegen ausserdem das Programm selbst und – falls eingerichtet – das
@@ -78,8 +85,13 @@ Die Version steht in `launcher\InkWaveLauncher.cs` (`AssemblyVersion`), angezeig
 - `launcher\InkWaveLauncher.cs` – Starter (entpacken, pythonw starten)
 - `app\main.pyw` – Einstieg der App
 - `app\kern.py` – Logik ohne Oberfläche (Modelle, GPU/CPU, Transkription, Umwandlung, Zusatzpakete)
-- `app\gui.py` – Hauptfenster
-- `app\theme.py` – Aussehen: hell/dunkel wie Windows, Lila-Akzente aus dem Logo
+- `app\konverter.py` – Videos in MP3 umwandeln (PyAV), ohne Oberfläche
+- `app\gui.py` – Hauptfenster: Kopfzeile, Seitenwechsel und die Seite «Transkribieren»
+- `app\start_seite.py` – Startseite mit den zwei Kacheln
+- `app\konverter_seite.py` – Seite «MP4 → MP3»
+- `app\einstellungen_seite.py` – Seite «Einstellungen»
+- `app\bausteine.py` – gemeinsame Bausteine, u. a. der Info-Knopf «i»
+- `app\theme.py` – Aussehen: hell/dunkel (wie Windows oder fest gewählt), Lila-Akzente aus dem Logo
 - `app\modelle_dialog.py` – Fenster «Modelle» (Download, Umwandeln, Zusatzpakete)
 - `tools\logo.png` – das Logo «Wellen zu Worten»; `tools\make_icon.py` macht daraus die .ico
 - `requirements.txt` – Pakete in der exe (exakte Versionen)

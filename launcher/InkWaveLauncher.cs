@@ -21,8 +21,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("InkWave")]
 [assembly: AssemblyProduct("InkWave")]
 [assembly: AssemblyDescription("Audio und Video lokal in Text umwandeln")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.3.0.0")]
+[assembly: AssemblyFileVersion("2.3.0.0")]
 
 static class InkWaveLauncher
 {
@@ -78,10 +78,25 @@ static class InkWaveLauncher
         return sb.ToString();
     }
 
+    /// <summary>Relative Pfade (Aufruf aus der Konsole: InkWave.exe aufnahme.mp3) gelten ab dem aktuellen
+    /// Ordner. Python startet aber im Programmordner und fände die Datei nicht – deshalb hier ganz ausschreiben.</summary>
+    static string FullPath(string a)
+    {
+        try
+        {
+            if (a.Length > 0 && !Path.IsPathRooted(a) && (File.Exists(a) || Directory.Exists(a)))
+                return Path.GetFullPath(a);
+        }
+        catch (Exception)
+        {
+        }
+        return a;
+    }
+
     static int Launch(string home, string exeDir, string[] args)
     {
         var arguments = new StringBuilder(Quote(Path.Combine(home, "app", "main.pyw")));
-        foreach (string a in args) arguments.Append(' ').Append(Quote(a));   // z. B. auf die exe gezogene Dateien
+        foreach (string a in args) arguments.Append(' ').Append(Quote(FullPath(a)));   // z. B. auf die exe gezogene Dateien
         var start = new ProcessStartInfo
         {
             FileName = Path.Combine(home, "python", "pythonw.exe"),
@@ -91,6 +106,7 @@ static class InkWaveLauncher
         };
         start.EnvironmentVariables["INKWAVE_DATA"] = exeDir;
         start.EnvironmentVariables["INKWAVE_EXE"] = Application.ExecutablePath;
+        start.EnvironmentVariables["INKWAVE_VERSION"] = Assembly.GetExecutingAssembly().GetName().Version.ToString(2);
         start.EnvironmentVariables["PYTHONUTF8"] = "1";
         start.EnvironmentVariables["PYTHONNOUSERSITE"] = "1";
         start.EnvironmentVariables.Remove("PYTHONPATH");

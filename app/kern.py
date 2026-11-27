@@ -16,6 +16,7 @@ Ordner:
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -82,8 +83,10 @@ def sprach_auswahl():
     return auswahl
 
 APP_ORDNER = Path(__file__).resolve().parent
+VERSION = os.environ.get("INKWAVE_VERSION") or ""          # vom Starter gesetzt; beim Entwickeln leer
 DATEN = Path(os.environ.get("INKWAVE_DATA") or (APP_ORDNER.parent / "daten"))
-OUTPUT_ORDNER = DATEN / "output"
+STANDARD_OUTPUT = DATEN / "output"
+OUTPUT_ORDNER = STANDARD_OUTPUT        # in den Einstellungen änderbar, siehe output_ordner_anwenden()
 MODELL_ORDNER = DATEN / "modelle"
 EINSTELLUNGEN = DATEN / "einstellungen.json"
 
@@ -142,10 +145,63 @@ class KeineTonspur(Exception):
 # ---------------------------------------------------------------- Einstellungen, Dateien
 
 def einstellungen_lesen() -> dict:
+    """Die Einstellungen als dict. Fehlt die Datei oder ist sie kaputt (von Hand bearbeitet): leer."""
     try:
-        return json.loads(EINSTELLUNGEN.read_text(encoding="utf-8"))
+        daten = json.loads(EINSTELLUNGEN.read_text(encoding="utf-8-sig"))   # -sig: verträgt den Editor-BOM
     except (OSError, ValueError):
         return {}
+    return daten if isinstance(daten, dict) else {}
+
+
+def einstellungen_entfernen(*schluessel):
+    """Einzelne Einstellungen löschen (= zurück auf den Standard)."""
+    daten = einstellungen_lesen()
+    for s in schluessel:
+        daten.pop(s, None)
+    try:
+        DATEN.mkdir(parents=True, exist_ok=True)
+        tmp = EINSTELLUNGEN.with_suffix(".tmp")
+        tmp.write_text(json.dumps(daten, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, EINSTELLUNGEN)
+    except OSError:
+        pass
+
+
+def einstellung(schluessel: str, standard):
+    """Eine Einstellung – nur wenn sie vom selben Typ ist wie der Standard (sonst der Standard)."""
+    wert = einstellungen_lesen().get(schluessel, standard)
+    return wert if type(wert) is type(standard) else standard
+
+
+def output_ordner_anwenden() -> Path:
+    """Setzt OUTPUT_ORDNER aus der Einstellung «output_ordner» (leer = Ordner «output» neben der exe)."""
+    global OUTPUT_ORDNER
+    wunsch = einstellung("output_ordner", "")
+    try:
+        OUTPUT_ORDNER = Path(wunsch) if wunsch and Path(wunsch).is_absolute() else STANDARD_OUTPUT
+    except (OSError, ValueError):
+        OUTPUT_ORDNER = STANDARD_OUTPUT
+    return OUTPUT_ORDNER
+
+
+def cpu_threads_einstellung() -> int:
+    """Wunsch aus einstellungen.json («cpu_threads») oder 0 = selbst bestimmen."""
+    try:
+        return int(einstellungen_lesen().get("cpu_threads") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+# Hugging-Face-Name: «Besitzer/Modell» (oder nur «Modell»), nur Buchstaben, Ziffern, . _ -
+_REPO_MUSTER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-]*(/[A-Za-z0-9_][A-Za-z0-9._\-]*)?")
+
+
+def repo_gueltig(repo) -> bool:
+    """Darf aus diesem Namen ein Ordnername werden? Aus dem Namen entstehen Pfade im Ordner «modelle»
+    und im Hugging-Face-Cache, die auch gelöscht werden – ein Name mit «..» oder Pfadzeichen (z. B. aus
+    einem manipulierten quelle.json eines kopierten Modells) dürfte sonst auf fremde Ordner zeigen."""
+    return (isinstance(repo, str) and len(repo) <= 200 and bool(_REPO_MUSTER.fullmatch(repo))
+            and ".." not in repo and not repo.endswith("."))
 
 
 def einstellungen_speichern(**werte):
@@ -158,6 +214,9 @@ def einstellungen_speichern(**werte):
         os.replace(tmp, EINSTELLUNGEN)
     except OSError:
         pass
+
+
+output_ordner_anwenden()
 
 
 def freier_stamm(name: str, endungen) -> Path:
@@ -189,13 +248,30 @@ def dateien_sammeln(eingaben):
     dateien, fehlend = [], []
     for e in eingaben:
         p = Path(e)
-        if p.is_dir():
-            dateien += sorted(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in AUDIO_ENDUNGEN)
-        elif p.is_file():
-            dateien.append(p)
-        else:
+        try:
+            if p.is_dir():
+                dateien += sorted(f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in AUDIO_ENDUNGEN)
+            elif p.is_file():
+                dateien.append(p)
+            else:
+                fehlend.append(str(e))
+        except OSError:          # z. B. Netzlaufwerk weg, kein Zugriff
             fehlend.append(str(e))
     return list(dict.fromkeys(dateien)), fehlend
+
+
+def ausgabe_pruefen():
+    """Lässt sich in den Output-Ordner schreiben? Gibt None zurück oder eine Fehlermeldung.
+    Wird vor dem Start geprüft, damit es nicht erst nach einer langen Transkription auffällt
+    (exe in einem schreibgeschützten Ordner, «Überwachter Ordnerzugriff» von Windows, Stick voll)."""
+    probe = OUTPUT_ORDNER / f".schreibtest-{os.getpid()}"
+    try:
+        OUTPUT_ORDNER.mkdir(parents=True, exist_ok=True)
+        probe.write_bytes(b"test")
+        probe.unlink()
+    except OSError as e:
+        return f"{OUTPUT_ORDNER}\n({e.strerror or type(e).__name__})"
+    return None
 
 
 def av_version_pruefen():
@@ -263,7 +339,13 @@ class WachHalten:
 def schonend_rechnen(an: bool):
     """Prozess-Priorität «niedriger als normal», damit der Laptop bedienbar bleibt."""
     try:
-        k32 = ctypes.windll.kernel32
+        from ctypes import wintypes
+        # Eigene kernel32-Instanz mit richtigen Typen: ohne sie wird das Handle auf 32 Bit gekürzt
+        # und Windows lehnt den Aufruf ab (Fehler 6) – die Priorität änderte sich dann nie.
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.SetPriorityClass.restype = wintypes.BOOL
         k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000 if an else 0x00000020)
     except Exception:
         pass
@@ -303,7 +385,10 @@ def nvidia_dlls_einbinden():
     for bin_ordner in _gpu_bin_ordner():
         if str(bin_ordner) in _eingebunden:
             continue
-        os.add_dll_directory(str(bin_ordner))
+        try:
+            os.add_dll_directory(str(bin_ordner))
+        except OSError:
+            continue              # Ordner gerade verschwunden -> fällt beim Testlauf auf
         os.environ["PATH"] = str(bin_ordner) + os.pathsep + os.environ.get("PATH", "")
         _eingebunden.add(str(bin_ordner))
     dlls = {p.name.lower(): p for o in _gpu_bin_ordner() for p in o.glob("*.dll")}
@@ -413,18 +498,22 @@ def gpu_paket_einrichten(quelle=None, melden=lambda **k: None):
         _kopieren_mit_fortschritt(dateien, quelle, melden)
     else:
         laden = GPU_ORDNER / "download"
+        shutil.rmtree(laden, ignore_errors=True)       # Reste eines abgebrochenen Versuchs
         laden.mkdir(parents=True, exist_ok=True)
         plan = []
         for paket, version in GPU_PAKETE:
             with urllib.request.urlopen(f"https://pypi.org/pypi/{paket}/{version}/json", timeout=30) as r:
                 info = json.load(r)
-            datei = next(u for u in info["urls"] if u["filename"].endswith("win_amd64.whl"))
+            datei = next((u for u in info["urls"] if u["filename"].endswith("win_amd64.whl")), None)
+            # nur direkt vom PyPI-Dateiserver laden, Prüfsumme (SHA-256) wird unten verglichen
+            if datei is None or not str(datei.get("url", "")).startswith("https://files.pythonhosted.org/"):
+                raise RuntimeError(f"Kein passendes Windows-Paket für {paket} {version} auf PyPI gefunden.")
             plan.append(datei)
-        gesamt = sum(d["size"] for d in plan)
+        gesamt = sum(d["size"] for d in plan) or 1
         geladen = 0
         for d in plan:
             melden(schritt=f"Lade {d['filename']} ({groesse_text(d['size'])}) …")
-            whl = laden / d["filename"]
+            whl = laden / Path(d["filename"]).name
             sha = hashlib.sha256()
             with urllib.request.urlopen(d["url"], timeout=60) as r, open(whl, "wb") as aus:
                 while True:
@@ -513,7 +602,7 @@ def umwandeln(quelle, repo: str = "", melden=lambda **k: None) -> Path:
         raise RuntimeError(f"Kein Whisper-Modell (model_type = {cfg.get('model_type')!r}).")
     n_mels = int(cfg.get("num_mel_bins") or 80)
 
-    ziel = umgewandelt_ordner(repo) if repo else MODELL_ORDNER / f"{quelle.name}-ct2"
+    ziel = umwandel_ziel(quelle, repo)
     teil = ziel.with_name(ziel.name + ".part")
     shutil.rmtree(teil, ignore_errors=True)
     MODELL_ORDNER.mkdir(parents=True, exist_ok=True)
@@ -620,7 +709,9 @@ def hf_cache() -> Path:
 
 def _cache_snapshot(repo: str):
     """Neuester Snapshot-Ordner eines Repos im HF-Cache (ohne Internet) oder None."""
-    basis = hf_cache() / ("models--" + repo.replace("/", "--"))
+    if not repo_gueltig(repo):
+        return None
+    basis = cache_ordner(repo)
     ref = basis / "refs" / "main"
     try:
         if ref.is_file():
@@ -633,12 +724,40 @@ def _cache_snapshot(repo: str):
         return None
 
 
+def _repo_pruefen(repo: str) -> str:
+    if not repo_gueltig(repo):
+        raise ValueError(f"Ungültiger Modellname: {str(repo)[:80]!r}")
+    return repo
+
+
 def umgewandelt_ordner(repo: str) -> Path:
-    return MODELL_ORDNER / repo.replace("/", "__")
+    return MODELL_ORDNER / _repo_pruefen(repo).replace("/", "__")
 
 
 def cache_ordner(repo: str) -> Path:
-    return hf_cache() / ("models--" + repo.replace("/", "--"))
+    return hf_cache() / ("models--" + _repo_pruefen(repo).replace("/", "--"))
+
+
+def umwandel_ziel(quelle, repo: str = "") -> Path:
+    """Wohin ein Modell umgewandelt wird: «modelle\\Besitzer__Modell» bzw. «modelle\\<Ordner>-ct2»."""
+    return umgewandelt_ordner(repo) if repo else MODELL_ORDNER / f"{Path(quelle).name}-ct2"
+
+
+def _quelle_repo(ordner: Path) -> str:
+    """Hugging-Face-Name aus quelle.json eines Modellordners – "" wenn er fehlt oder ungültig ist."""
+    try:
+        daten = json.loads((ordner / "quelle.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    repo = daten.get("repo", "") if isinstance(daten, dict) else ""
+    return repo if repo_gueltig(repo) else ""
+
+
+def _modell_unterordner() -> list:
+    try:
+        return sorted(p for p in MODELL_ORDNER.iterdir() if p.is_dir())
+    except OSError:
+        return []
 
 
 def _ordner_bytes(p: Path) -> int:
@@ -651,17 +770,14 @@ def _ordner_bytes(p: Path) -> int:
 def ueberfluessige_originale() -> list:
     """[(repo, bytes)] – Originale im HF-Cache, deren umgewandelte Fassung schon in «modelle» liegt."""
     gefunden = []
-    if not MODELL_ORDNER.is_dir():
-        return gefunden
-    for ordner in MODELL_ORDNER.iterdir():
-        if not (ordner.is_dir() and ist_ct2(ordner)):
+    for ordner in _modell_unterordner():
+        if not ist_ct2(ordner):
             continue
-        try:
-            repo = json.loads((ordner / "quelle.json").read_text(encoding="utf-8")).get("repo", "")
-        except (OSError, ValueError):
-            continue
-        if repo and cache_ordner(repo).is_dir():
-            gefunden.append((repo, _ordner_bytes(cache_ordner(repo))))
+        repo = _quelle_repo(ordner)
+        # nur wenn die umgewandelte Fassung wirklich dort liegt, wo original_loeschen() sie erwartet
+        if repo and ist_ct2(umgewandelt_ordner(repo)) and cache_ordner(repo).is_dir():
+            if repo not in (r for r, _ in gefunden):
+                gefunden.append((repo, _ordner_bytes(cache_ordner(repo))))
     return gefunden
 
 
@@ -692,41 +808,40 @@ def modell_liste() -> list:
         gesehen.add(repo.lower())
 
     # eigene Modelle (auch umgewandelte Hugging-Face-Modelle, Name aus quelle.json)
-    if MODELL_ORDNER.is_dir():
-        for ordner in sorted(p for p in MODELL_ORDNER.iterdir() if p.is_dir()):
-            repo = ""
+    namen = {m.name for m in liste}
+    for ordner in _modell_unterordner():
+        if not (ist_ct2(ordner) or ist_transformers(ordner)):
+            continue
+        repo = _quelle_repo(ordner)
+        name = repo or ordner.name
+        if name in namen:              # heisst wie ein anderes Modell (z. B. Ordner «small») -> unterscheidbar
+            name = f"{name} (Ordner {ordner.name})"
+        namen.add(name)
+        if ist_ct2(ordner):
             try:
-                repo = json.loads((ordner / "quelle.json").read_text(encoding="utf-8")).get("repo", "")
-            except (OSError, ValueError):
-                pass
-            name = repo or ordner.name
-            if ist_ct2(ordner):
-                try:
-                    g = groesse_text((ordner / "model.bin").stat().st_size)
-                except OSError:
-                    g = ""
-                liste.append(Modell(name, "eigen", "bereit", pfad=str(ordner), repo=repo, groesse=g,
-                                    beschreibung="eigenes Modell" if not repo else "umgewandelt"))
-            elif ist_transformers(ordner):
-                liste.append(Modell(name, "eigen", "umwandeln", roh_pfad=str(ordner), repo=repo,
-                                    beschreibung="muss noch umgewandelt werden"))
-            else:
-                continue
-            if repo:
-                gesehen.add(repo.lower())
+                g = groesse_text((ordner / "model.bin").stat().st_size)
+            except OSError:
+                g = ""
+            liste.append(Modell(name, "eigen", "bereit", pfad=str(ordner), repo=repo, groesse=g,
+                                beschreibung="eigenes Modell" if not repo else "umgewandelt"))
+        else:
+            liste.append(Modell(name, "eigen", "umwandeln", roh_pfad=str(ordner), repo=repo,
+                                beschreibung="muss noch umgewandelt werden"))
+        if repo:
+            gesehen.add(repo.lower())
 
     # Hugging-Face-Cache und selbst hinzugefügte Namen
     repos = {}
     try:
         for d in hf_cache().glob("models--*"):
-            teile = d.name.split("--", 1)[1]
-            repos[teile.replace("--", "/", 1)] = None
+            repo = d.name.split("--", 1)[1].replace("--", "/", 1)
+            if repo_gueltig(repo):
+                repos[repo] = None
     except OSError:
         pass
-    e = einstellungen_lesen()
-    for repo in e.get("hf_modelle", []):
+    gemerkt, groessen = _hf_gemerkt()
+    for repo in gemerkt:
         repos.setdefault(repo, None)
-    groessen = e.get("hf_groessen", {})
     for repo in sorted(repos, key=str.lower):
         if repo.lower() in gesehen:
             continue
@@ -742,6 +857,18 @@ def modell_liste() -> list:
             liste.append(Modell(repo, "cache", "fehlt", repo=repo, groesse=g,
                                 beschreibung="noch nicht heruntergeladen"))
     return liste
+
+
+def _hf_gemerkt():
+    """(Namen, Grössen) der selbst hinzugefügten Hugging-Face-Modelle aus einstellungen.json –
+    nur gültige Einträge, damit eine von Hand geänderte Datei die App nicht stolpern lässt."""
+    e = einstellungen_lesen()
+    liste, groessen = e.get("hf_modelle"), e.get("hf_groessen")
+    liste = [r for r in liste if repo_gueltig(r)] if isinstance(liste, list) else []
+    groessen = ({k: v for k, v in groessen.items()
+                 if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
+                if isinstance(groessen, dict) else {})
+    return liste, groessen
 
 
 def modell_finden(name: str):
@@ -775,10 +902,10 @@ def download_plan(repo: str):
 
 def cache_bytes(repo: str) -> int:
     """Wie viel vom Repo schon im Cache liegt (inkl. halb geladener Dateien)."""
-    blobs = hf_cache() / ("models--" + repo.replace("/", "--")) / "blobs"
     try:
+        blobs = cache_ordner(repo) / "blobs"
         return sum(p.stat().st_size for p in blobs.iterdir() if p.is_file())
-    except OSError:
+    except (OSError, ValueError):
         return 0
 
 
@@ -800,10 +927,51 @@ def prozess_starten(argumente, protokoll: Path) -> subprocess.Popen:
         python = konsole
     protokoll.parent.mkdir(parents=True, exist_ok=True)
     umgebung = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", PYTHONUTF8="1")
+    # stderr ins selbe Protokoll: stürzt der Auftrag unerwartet ab, steht dort wenigstens der Grund
     with open(protokoll, "w", encoding="utf-8") as aus:
         return subprocess.Popen([str(python), str(Path(__file__).resolve()), *argumente],
-                                stdout=aus, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                stdout=aus, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 env=umgebung, **_ohne_fenster())
+
+
+def prozess_beenden(proc: subprocess.Popen, warten: float = 5.0):
+    """Beendet einen Auftrag samt seinen Kindprozessen. terminate() allein trifft nur den Auftrag
+    selbst – das pip darunter (Umwandlungs-Paket) lüde sonst im Hintergrund weiter."""
+    if proc.poll() is None and os.name == "nt":
+        try:
+            taskkill = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "taskkill.exe"
+            subprocess.run([str(taskkill), "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                           timeout=10, **_ohne_fenster())
+        except Exception:
+            pass
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(warten)
+    except Exception:
+        pass
+
+
+def auftrag_reste_loeschen(art: str, repo: str = "", quelle: str = ""):
+    """Nach einem abgebrochenen Auftrag die halbfertigen Ordner wegräumen (bis zu mehreren GB).
+    Angefangene Modell-Downloads bleiben liegen – die setzt Hugging Face beim nächsten Mal fort."""
+    import shutil
+    reste = []
+    try:
+        if art == "gpu":
+            reste = [GPU_ORDNER / "nvidia.part", GPU_ORDNER / "download"]
+        elif art == "umwandlung":
+            reste = [UMWANDLUNG_ORDNER.with_name(UMWANDLUNG_ORDNER.name + ".part")]
+        elif art == "umwandeln" and quelle:
+            ziel = umwandel_ziel(quelle, repo)
+            reste = [ziel.with_name(ziel.name + ".part")]
+    except ValueError:
+        return
+    for r in reste:
+        shutil.rmtree(r, ignore_errors=True)
 
 
 def download_starten(repo: str, protokoll: Path) -> subprocess.Popen:
@@ -846,15 +1014,16 @@ def hf_modell_pruefen(repo: str) -> dict:
         fmt = "transformers"
     else:
         fmt = "unbekannt"
-    typ = ((info.config or {}).get("model_type") or "").lower()
+    typ = str((info.config or {}).get("model_type") or "").lower()
     whisper = fmt == "ct2" or typ == "whisper" or "whisper" in repo.lower()
-    return {"repo": info.id, "format": fmt, "gesamt": gesamt, "whisper": whisper}
+    # info.id = Schreibweise von Hugging Face (Gross/Klein); nur übernehmen, wenn es ein sauberer Name ist
+    return {"repo": info.id if repo_gueltig(info.id) else repo, "format": fmt, "gesamt": gesamt,
+            "whisper": whisper}
 
 
 def hf_modell_merken(repo: str, gesamt: int = 0):
-    e = einstellungen_lesen()
-    liste = e.get("hf_modelle", [])
-    groessen = e.get("hf_groessen", {})
+    _repo_pruefen(repo)
+    liste, groessen = _hf_gemerkt()
     if gesamt:
         groessen[repo] = gesamt
     einstellungen_speichern(hf_modelle=liste + ([repo] if repo not in liste else []), hf_groessen=groessen)
@@ -959,6 +1128,10 @@ def transkribieren(modell, batch, datei: Path, sprache=None, srt=False, zeitstem
         else:
             segmente, info = modell.transcribe(str(datei), language=sprache, vad_filter=True, beam_size=5)
     except (IndexError, ValueError) as e:
+        if _ist_av_fehler(e):
+            # Dekodierfehler von PyAV sind auch ValueError – das ist keine stille, sondern eine kaputte Datei
+            raise KeineTonspur(f"Die Datei lässt sich nicht dekodieren – beschädigt? "
+                               f"({type(e).__name__})") from e
         if sprache is None:
             # Randfall: stille Datei -> nach dem VAD bleibt nichts für die Spracherkennung übrig
             raise KeineSprache("Keine Sprache gefunden – ist die Datei still? "
@@ -990,17 +1163,59 @@ def transkribieren(modell, batch, datei: Path, sprache=None, srt=False, zeitstem
         raise KeineSprache("Kein Text erkannt – die Datei scheint still zu sein.")
     melden("fortschritt", anteil=1.0, position=dauer, dauer=dauer)
 
-    OUTPUT_ORDNER.mkdir(parents=True, exist_ok=True)
-    stamm = freier_stamm(datei.stem, [".txt", ".srt"] if srt else [".txt"])
-    txt = stamm.with_name(stamm.name + ".txt")
-    txt.write_text("\n".join(zeilen) + "\n", encoding="utf-8")
-    srt_datei = None
-    if srt:
-        srt_datei = stamm.with_name(stamm.name + ".srt")
-        srt_datei.write_text("\n".join(srt_bloecke), encoding="utf-8")
-
+    txt, srt_datei = ergebnis_schreiben(datei.stem, "\n".join(zeilen) + "\n",
+                                        "\n".join(srt_bloecke) if srt else None)
     return Ergebnis(datei, txt, srt_datei, info.language, info.language_probability, dauer,
                     time.time() - start)
+
+
+def _ist_av_fehler(e: Exception) -> bool:
+    try:
+        import av
+        return isinstance(e, av.error.FFmpegError)
+    except Exception:
+        return False
+
+
+def ergebnis_schreiben(name: str, text: str, srt_text=None):
+    """Schreibt output\\name.txt (und .srt) und gibt (txt, srt oder None) zurück.
+    Überschreibt nie etwas: die .txt wird «exklusiv» angelegt – ist der Name inzwischen vergeben
+    (zweites InkWave-Fenster), kommt der nächste freie dran. Ist der Name zu lang für Windows,
+    wird er gekürzt, statt das fertige Ergebnis zu verlieren."""
+    OUTPUT_ORDNER.mkdir(parents=True, exist_ok=True)
+    endungen = [".txt", ".srt"] if srt_text is not None else [".txt"]
+    kandidaten = [name]
+    if len(name) > 100:
+        kandidaten.append(name[:100].rstrip(" .") or "transkript")
+    for nr, kandidat in enumerate(kandidaten, 1):
+        angelegt = []                      # was dieser Versuch selbst angelegt hat
+        try:
+            while True:
+                stamm = freier_stamm(kandidat, endungen)
+                try:
+                    for endung, inhalt in ((".txt", text), (".srt", srt_text)):
+                        if inhalt is None:
+                            continue
+                        pfad = stamm.with_name(stamm.name + endung)
+                        with open(pfad, "x", encoding="utf-8") as f:
+                            angelegt.append(pfad)
+                            f.write(inhalt)
+                    break
+                except FileExistsError:    # Name inzwischen vergeben -> nächster freier
+                    _dateien_loeschen(angelegt)
+            return angelegt[0], (angelegt[1] if len(angelegt) > 1 else None)
+        except OSError:
+            _dateien_loeschen(angelegt)    # halb geschriebene Dateien nicht liegen lassen
+            if nr == len(kandidaten):
+                raise
+
+
+def _dateien_loeschen(pfade: list):
+    while pfade:
+        try:
+            pfade.pop().unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- Aufruf von der Kommandozeile
@@ -1010,6 +1225,7 @@ def _cli():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == "--download":
         try:
+            _repo_pruefen(args[1])
             muster, gesamt = download_plan(args[1])
             print(f"GESAMT {gesamt}", flush=True)
             print(f"FERTIG {herunterladen(args[1], muster)}", flush=True)

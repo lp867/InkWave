@@ -13,6 +13,8 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
+import kern
+
 FARBEN = {
     "dunkel": {
         "hintergrund": "#100a18", "karte": "#1a1325", "karte_rand": "#2b2139", "feld": "#211a2d",
@@ -66,7 +68,7 @@ QComboBox, QLineEdit { background: $feld; border: 1px solid $feld_rand; border-r
 QComboBox:hover, QLineEdit:hover, QComboBox:focus, QLineEdit:focus { border-color: $akzent; }
 QComboBox:disabled, QLineEdit:disabled { color: $gedaempft; background: $karte; }
 QComboBox::drop-down { border: none; width: 28px; }
-QComboBox::down-arrow { image: url($pfeil); width: 12px; height: 12px; }
+QComboBox::down-arrow { image: url("$pfeil"); width: 12px; height: 12px; }
 QComboBox QAbstractItemView { background: $karte; border: 1px solid $karte_rand; padding: 4px; outline: 0;
                               selection-background-color: $auswahl; selection-color: $text; }
 QComboBox QAbstractItemView::item { min-height: 26px; padding: 2px 6px; }
@@ -76,7 +78,7 @@ QCheckBox::indicator, QTreeView::indicator { width: 18px; height: 18px; border-r
                                              border: 1px solid $feld_rand; background: $feld; }
 QCheckBox::indicator:hover, QTreeView::indicator:hover { border-color: $akzent; }
 QCheckBox::indicator:checked, QTreeView::indicator:checked { background: $akzent; border-color: $akzent;
-                                                              image: url($haken); }
+                                                              image: url("$haken"); }
 QCheckBox::indicator:disabled { background: $karte; }
 
 QTreeView { background: transparent; border: none; outline: 0; }
@@ -116,6 +118,27 @@ QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 4px; color:
 
 QScrollArea#rollen, QWidget#innen, QScrollArea#rollen > QWidget#qt_scrollarea_viewport { background: transparent;
                                                                                         border: none; }
+QLabel#begruessung { font-size: 21pt; font-weight: 800; }
+QFrame#kachel { background: $karte; border: 2px solid $karte_rand; border-radius: 22px; }
+QFrame#kachel[aktiv="true"] { border-color: $akzent; background: $drop; }
+QLabel#kachel_titel { font-size: 17pt; font-weight: 800; }
+QLabel#kachel_los { color: $akzent_text; font-size: 11pt; font-weight: 700; }
+QLabel#kachel_hinweis { background: $akzent_weich; color: $akzent_text; border-radius: 10px; padding: 3px 10px;
+                        font-weight: 600; }
+QPushButton#zurueck { background: $feld; border: 1px solid $feld_rand; border-radius: 15px; padding: 6px 14px;
+                      font-weight: 600; }
+QPushButton#zurueck:hover { border-color: $akzent; color: $akzent_text; }
+QPushButton#segment { border-radius: 0; padding: 7px 18px; margin: 0; }
+QPushButton#segment[lage="links"] { border-top-left-radius: 9px; border-bottom-left-radius: 9px; }
+QPushButton#segment[lage="rechts"] { border-top-right-radius: 9px; border-bottom-right-radius: 9px; }
+QPushButton#segment:checked { background: $akzent; border-color: $akzent; color: white; font-weight: 700; }
+QToolButton#info { background: transparent; border: 1px solid $feld_rand; border-radius: 10px; color: $gedaempft;
+                   font-size: 9pt; font-weight: 700; font-style: italic; padding: 0; }
+QToolButton#info:hover, QToolButton#info:focus { border-color: $akzent; color: $akzent_text; background: $akzent_weich; }
+QFrame#infoblase { background: $karte; border: 1px solid $akzent; border-radius: 12px; }
+QLabel#info_titel { font-weight: 700; color: $akzent_text; }
+QFrame#trennlinie { background: $karte_rand; border: none; }
+QLabel#pfad { background: $feld; border: 1px solid $karte_rand; border-radius: 8px; padding: 6px 10px; }
 QFrame#dropzone { background: $drop; border: 2px dashed $feld_rand; border-radius: 16px; }
 QFrame#dropzone[aktiv="true"] { background: $akzent_weich; border-color: $akzent; }
 QSplitter::handle { background: transparent; }
@@ -132,18 +155,30 @@ f = dict(FARBEN["dunkel"])
 
 
 def _bilder(name: str, farben: dict) -> dict:
-    """Kleine SVG-Bilder (Häkchen, Pfeil) ablegen – Qt-Stylesheets brauchen dafür Dateien."""
+    """Kleine SVG-Bilder (Häkchen, Pfeil) ablegen – Qt-Stylesheets brauchen dafür Dateien.
+    Die Pfade stehen im Stylesheet in Anführungszeichen (Benutzernamen mit Leerzeichen oder Klammern)."""
     ordner = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "InkWave" / "thema"
-    ordner.mkdir(parents=True, exist_ok=True)
     haken = ordner / "haken.svg"
     pfeil = ordner / f"pfeil_{name}.svg"
-    haken.write_text(_HAKEN, encoding="utf-8")
-    pfeil.write_text(_PFEIL.format(farbe=farben["gedaempft"]), encoding="utf-8")
+    try:
+        ordner.mkdir(parents=True, exist_ok=True)
+        haken.write_text(_HAKEN, encoding="utf-8")
+        pfeil.write_text(_PFEIL.format(farbe=farben["gedaempft"]), encoding="utf-8")
+    except OSError:
+        pass          # dann fehlen höchstens Häkchen und Pfeil – kein Grund, den Start abzubrechen
     return {"haken": haken.as_posix(), "pfeil": pfeil.as_posix()}
 
 
+def gewaehltes_thema() -> str:
+    """Die Wahl aus den Einstellungen: "system" (wie Windows), "hell" oder "dunkel"."""
+    wahl = kern.einstellung("thema", "system")
+    return wahl if wahl in ("hell", "dunkel") else "system"
+
+
 def windows_dunkel() -> bool:
-    erzwungen = os.environ.get("INKWAVE_THEMA", "").lower()
+    erzwungen = os.environ.get("INKWAVE_THEMA", "").lower()      # nur zum Testen
+    if erzwungen not in ("hell", "dunkel"):
+        erzwungen = gewaehltes_thema()                            # Einstellungen der App
     if erzwungen in ("hell", "dunkel"):
         return erzwungen == "dunkel"
     schema = QApplication.styleHints().colorScheme()

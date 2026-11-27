@@ -12,3 +12,24 @@ hf-xet==1.7.0
 tqdm==4.70.0
 PySide6-Essentials==6.11.3
 pip==26.3               # für das Umwandlungs-Paket (transformers + torch), das die App nachlädt
+
+# Indirekte Abhängigkeiten – festgehalten auf dem Stand von InkWave 2.1 (so ausgeliefert und getestet).
+# Ohne diese Zeilen nähme pip bei jedem Bauen die gerade neuste Version: der Build wäre nicht
+# wiederholbar, und eine frisch veröffentlichte (kaputte oder manipulierte) Version käme ungeprüft
+# in die exe. Beim Aktualisieren eines Pakets oben: diese Liste mit `pip list` aus build\stage abgleichen.
+anyio==4.16.0
+click==8.5.1
+colorama==0.4.6
+filelock==4.3.1
+flatbuffers==25.12.19
+fsspec==2026.9.0
+h11==0.16.0
+httpcore2==2.16.2
+httpx2==2.16.2
+idna==3.20
+packaging==26.4
+protobuf==7.36.2
+PyYAML==6.0.4
+shiboken6==6.11.3
+truststore==0.10.5
+typing_extensions==4.16.0
